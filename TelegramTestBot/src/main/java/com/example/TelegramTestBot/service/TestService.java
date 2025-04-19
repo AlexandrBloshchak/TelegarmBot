@@ -87,6 +87,15 @@ public class TestService {
         }
         return questions;
     }
+    @Transactional
+    public void addQuestionToTest(Long testId, Question question) {
+        testRepository.findById(testId).ifPresent(test -> {
+            question.setTest(test);  // Привязываем вопрос к тесту
+            questionService.save(question);  // Сохраняем вопрос
+            test.setStatus(Test.TestStatus.PUBLISHED);  // После добавления вопросов можно опубликовать тест
+            testRepository.save(test);
+        });
+    }
 
     // Пример метода парсинга файла (заглушка для DOCX)
     private List<Question> parseFile(String filePath) {

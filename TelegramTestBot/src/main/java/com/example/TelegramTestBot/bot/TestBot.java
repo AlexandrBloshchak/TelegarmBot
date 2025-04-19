@@ -17,7 +17,6 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.Keyboard
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import java.io.Serializable;
-import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -70,33 +69,55 @@ public class TestBot extends TelegramLongPollingBot {
                 return;
             }
 
-            // 📦 Передаём update в creatorController вне зависимости от текста/документа
-            BotApiMethod<? extends Serializable> response = creatorController.handleUpdate(update, user);
+            BotApiMethod<? extends Serializable> response = null;
 
-            // 🔁 Если creatorController ничего не вернул, обрабатываем обычные команды
-            if (response == null && update.getMessage().hasText()) {
-                String text = update.getMessage().getText();
-                switch (text) {
-                    case "Создать тест" -> response = creatorController.handleUpdate(update, user);
-                    case "Пройти тест" -> response = participantController.handleUpdate(update, user);
-                    default -> response = SendMessage.builder()
-                            .chatId(chatId.toString())
-                            .text("Пожалуйста, выберите действие с клавиатуры:")
-                            .replyMarkup(mainKeyboard())
-                            .build();
-                }
+            if (update.getMessage().hasText() && update.getMessage().getText().equals("/start")) {
+                execute(mainMenu(chatId));
+                return;
             }
 
-            if (response != null) {
-                execute(response);
+            try {
+                // Обработка через контроллеры
+                response = creatorController.handleUpdate(update, user);
+
+                if (response == null && update.getMessage().hasText()) {
+                    String text = update.getMessage().getText();
+                    switch (text) {
+                        case "Создать тест" -> response = creatorController.handleUpdate(update, user);
+                        case "Пройти тест" -> response = participantController.handleUpdate(update, user);
+                        default -> response = SendMessage.builder()
+                                .chatId(chatId.toString())
+                                .text("Выберите действие с клавиатуры:")
+                                .replyMarkup(mainKeyboard())
+                                .build();
+                    }
+                }
+
+                if (response != null) {
+                    execute(response);
+                }
+
+            } catch (Exception e) {
+                log.error("Ошибка при обработке команды: {}", e.getMessage());
+                sendErrorMessage(chatId, "Произошла ошибка при обработке команды");
             }
 
         } catch (TelegramApiException e) {
-            log.error("Ошибка при обработке обновления: {}", e.getMessage());
-            sendErrorMessage(chatId);
+            log.error("Ошибка Telegram API: {}", e.getMessage());
+            sendErrorMessage(chatId, "Ошибка связи с Telegram");
         }
     }
 
+    private void sendErrorMessage(Long chatId, String message) {
+        try {
+            execute(SendMessage.builder()
+                    .chatId(chatId.toString())
+                    .text(message)
+                    .build());
+        } catch (TelegramApiException e) {
+            log.error("Ошибка при отправке сообщения об ошибке: {}", e.getMessage());
+        }
+    }
 
     private SendMessage mainMenu(Long chatId) {
         return SendMessage.builder()
@@ -108,31 +129,11 @@ public class TestBot extends TelegramLongPollingBot {
 
     private ReplyKeyboardMarkup mainKeyboard() {
         ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
-        keyboard.setResizeKeyboard(true);
-        keyboard.setOneTimeKeyboard(false); // Клавиатура остаётся активной
-        List<KeyboardRow> rows = new ArrayList<>();
-
         KeyboardRow row = new KeyboardRow();
         row.add("Пройти тест");
         row.add("Создать тест");
-        rows.add(row);
-
-        keyboard.setKeyboard(rows);
-        return keyboard;
-    }
-
-    private ReplyKeyboardMarkup creatorKeyboard() {
-        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        keyboard.setKeyboard(List.of(row));
         keyboard.setResizeKeyboard(true);
-        keyboard.setOneTimeKeyboard(false); // Клавиатура остаётся активной
-        List<KeyboardRow> rows = new ArrayList<>();
-
-        KeyboardRow row = new KeyboardRow();
-        row.add("Ввести вручную");
-        row.add("Загрузить файл с вопросами");
-        rows.add(row);
-
-        keyboard.setKeyboard(rows);
         return keyboard;
     }
 
@@ -141,7 +142,6 @@ public class TestBot extends TelegramLongPollingBot {
             execute(SendMessage.builder()
                     .chatId(chatId.toString())
                     .text("Произошла ошибка. Пожалуйста, попробуйте позже.")
-                    .replyMarkup(mainKeyboard())
                     .build());
         } catch (TelegramApiException e) {
             log.error("Ошибка при отправке сообщения об ошибке: {}", e.getMessage());

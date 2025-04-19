@@ -3,6 +3,8 @@ package com.example.TelegramTestBot.model;
 import lombok.Data;
 import jakarta.persistence.*;
 
+import java.util.List;
+
 @Data
 @Entity
 public class Question {
@@ -16,4 +18,15 @@ public class Question {
 
     @ManyToOne
     private Test test;  // Связь с тестом
+
+    // Конструктор для создания вопроса с текстом и правильным ответом
+    public Question(String text, String correctAnswer, String options) {
+        this.text = text;
+        this.correctAnswer = correctAnswer;
+        this.options = options;
+    }
+
+    // Пустой конструктор для JPA
+    public Question() {
+    }
 }
