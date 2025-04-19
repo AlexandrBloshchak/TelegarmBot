@@ -10,10 +10,10 @@ public class Question {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    private String text;
-    private String correctAnswer;
-    private String options; // JSON массив вариантов
+    private String text;             // Текст вопроса
+    private String correctAnswer;    // Правильный ответ
+    private String options;          // JSON массив вариантов (для множественного выбора)
 
     @ManyToOne
-    private Test test;
+    private Test test;  // Связь с тестом
 }

@@ -4,10 +4,12 @@ import com.example.TelegramTestBot.model.User;
 import com.example.TelegramTestBot.repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-import org.telegram.telegrambots.meta.api.objects.Message;
+
+import java.util.Optional;
 
 @Service
 public class UserService {
+
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
 
@@ -16,33 +18,33 @@ public class UserService {
         this.passwordEncoder = passwordEncoder;
     }
 
-    public User registerNewUser(Long chatId, String firstName, String lastName,
-                                String middleName, String username, String password) {
-        User user = new User();
-        user.setChatId(chatId);
-        user.setFirstName(firstName);
-        user.setLastName(lastName);
-        user.setMiddleName(middleName);
-        user.setUsername(username);
-        user.setPassword(passwordEncoder.encode(password));
-        user.setRole(User.Role.PARTICIPANT);
-        return userRepository.save(user);
+    public boolean authenticate(String username, String password) {
+        return authenticate(username, password, null);
     }
 
-    public User authenticateUser(Long chatId, String username, String password) {
+    public boolean authenticate(String username, String rawPassword, Long chatId) {
         return userRepository.findByUsername(username)
-                .filter(user -> passwordEncoder.matches(password, user.getPassword()))
                 .map(user -> {
-                    user.setChatId(chatId);
-                    user.setAuthenticated(true);
-                    return userRepository.save(user);
+                    boolean match = passwordEncoder.matches(rawPassword, user.getPassword());
+                    if (match && chatId != null && user.getChatId() == null) {
+                        user.setChatId(chatId);
+                        userRepository.save(user);
+                    }
+                    return match;
                 })
-                .orElse(null);
+                .orElse(false);
     }
 
-    public User getAuthenticatedUser(Long chatId) {
-        return userRepository.findByChatId(chatId)
-                .filter(User::isAuthenticated)
-                .orElse(null);
+    public Optional<User> getAuthenticatedUser(Long chatId) {
+        return userRepository.findByChatId(chatId);
+    }
+
+    public boolean userExists(String username) {
+        return userRepository.findByUsername(username).isPresent();
+    }
+
+    public void register(User user) {
+        user.setPassword(passwordEncoder.encode(user.getPassword()));
+        userRepository.save(user);
     }
 }

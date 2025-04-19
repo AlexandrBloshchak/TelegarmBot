@@ -1,64 +1,130 @@
 package com.example.TelegramTestBot.controller;
 
-import com.example.TelegramTestBot.model.User;
+import com.example.TelegramTestBot.dto.QuestionDto;
+import com.example.TelegramTestBot.model.Question;
 import com.example.TelegramTestBot.model.Test;
+import com.example.TelegramTestBot.model.User;
 import com.example.TelegramTestBot.service.TestService;
-import lombok.extern.slf4j.Slf4j;
+import com.example.TelegramTestBot.bot.TestBot;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.springframework.stereotype.Component;
-import org.telegram.telegrambots.meta.api.methods.BotApiMethod;
+import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
-import org.telegram.telegrambots.meta.api.objects.Message;
+import org.telegram.telegrambots.meta.api.objects.Document;
+import org.telegram.telegrambots.meta.api.objects.File;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
-@Slf4j
 @Component
 public class TestCreatorController {
-    private final TestService testService;
 
-    public TestCreatorController(TestService testService) {
+    private final TestBot testBot;
+    private final TestService testService;
+    private Map<Long, TestSession> testSessions;
+
+    public TestCreatorController(TestBot testBot, TestService testService) {
+        this.testBot = testBot;
         this.testService = testService;
     }
 
-    public BotApiMethod<?> handleUpdate(Update update, User user) {
-        String text = update.getMessage().getText();
+    public SendMessage handleUpdate(Update update, User user) {
         Long chatId = update.getMessage().getChatId();
+        String text = update.getMessage().getText();
+        TestSession session = testSessions.computeIfAbsent(chatId, k -> new TestSession());
 
-        if (text.equals("/creator")) {
-            return createMainCreatorMenu(chatId);
-        } else if (text.equals("/creator_new_test")) {
-            return createNewTest(chatId, user);
+        if (session.state == TestCreationState.AWAITING_TITLE) {
+            session.testTitle = text;  // Сохраняем название теста
+            session.state = TestCreationState.AWAITING_FILE;
+            return new SendMessage(chatId.toString(), "Пожалуйста, отправьте файл с вопросами.");
         }
-        // Другие команды создателя
 
-        return null;
-    }
-    public BotApiMethod<?> handleDocument(Update update, User user) {
-        Message message = update.getMessage();
-        if (message.hasDocument()) {
-            String fileName = message.getDocument().getFileName();
-            if (fileName.endsWith(".txt") || fileName.endsWith(".docx")) {
-                // Логика обработки документа
-                return SendMessage.builder()
-                        .chatId(message.getChatId().toString())
-                        .text("Документ получен. Обработка...")
-                        .build();
+        // Обработка загрузки файла с вопросами
+        if (session.state == TestCreationState.AWAITING_FILE && update.getMessage().hasDocument()) {
+            Document fileDocument = update.getMessage().getDocument();
+            String fileId = fileDocument.getFileId();
+
+            try {
+                // Получаем путь к файлу
+                File file = getFilePath(fileId);
+                String filePath = file.getFilePath();
+
+                // Парсим файл
+                List<QuestionDto> questions = parseFile(filePath);
+
+                // Заполняем список вопросов
+                session.questions.addAll(questions);
+
+                // Создаём тест и сохраняем его в БД
+                Test test = new Test();
+                test.setTitle(session.testTitle);
+                test.setCreator(user);
+                test = testService.saveTest(test);
+
+                // Сохраняем вопросы в БД, привязываем их к тесту
+                for (QuestionDto questionDto : session.questions) {
+                    Question question = new Question();
+                    question.setText(questionDto.getQuestionText());
+                    question.setCorrectAnswer(questionDto.getCorrectAnswer());
+                    question.setTest(test);
+                    testService.saveQuestion(question);
+                }
+
+                session.state = TestCreationState.COMPLETE;
+                return new SendMessage(chatId.toString(), "✅ Вопросы успешно загружены!\nТест сохранён.");
+            } catch (TelegramApiException | IOException e) {
+                e.printStackTrace();
+                return new SendMessage(chatId.toString(), "Ошибка при обработке файла.");
             }
         }
-        return null;
+
+        return new SendMessage(chatId.toString(), "Что-то пошло не так.");
     }
 
-    private BotApiMethod<?> createMainCreatorMenu(Long chatId) {
-        // Реализация меню создателя
-        return null;
+    // Получаем файл по ID
+    private File getFilePath(String fileId) throws TelegramApiException {
+        GetFile getFileMethod = new GetFile();
+        getFileMethod.setFileId(fileId);
+        return testBot.execute(getFileMethod);
     }
 
-    private BotApiMethod<?> createNewTest(Long chatId, User user) {
-        Test test = testService.createNewTest(user);
-        return SendMessage.builder()
-                .chatId(chatId.toString())
-                .text("Создан новый тест. Введите название:")
-                .build();
+    // Парсинг файла (используем Apache POI для DOCX)
+    private List<QuestionDto> parseFile(String filePath) throws IOException {
+        List<QuestionDto> questions = new ArrayList<>();
+
+        // Открываем файл
+        try (FileInputStream fis = new FileInputStream(filePath)) {
+            XWPFDocument document = new XWPFDocument(fis);
+
+            // Извлекаем текст из каждого абзаца
+            for (org.apache.poi.xwpf.usermodel.XWPFParagraph paragraph : document.getParagraphs()) {
+                String paragraphText = paragraph.getText();
+                // Определяем вопрос и ответ по структуре текста
+                if (paragraphText.startsWith("Q: ")) {
+                    String questionText = paragraphText.substring(3).trim();
+                    String correctAnswer = document.getParagraphs().get(document.getParagraphs().indexOf(paragraph) + 1).getText(); // Следующий абзац - ответ
+                    questions.add(new QuestionDto(questionText, correctAnswer));
+                }
+            }
+        }
+        return questions;
+    }
+
+    private static class TestSession {
+        TestCreationState state = TestCreationState.NONE;
+        String testTitle;
+        List<QuestionDto> questions = new ArrayList<>();
+    }
+
+    enum TestCreationState {
+        NONE,
+        AWAITING_TITLE,     // Запрос названия теста
+        AWAITING_FILE,      // Ожидание файла
+        COMPLETE            // Завершено
     }
 }
