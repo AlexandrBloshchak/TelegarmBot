@@ -1,32 +1,38 @@
 package com.example.TelegramTestBot.model;
 
-import lombok.Data;
 import jakarta.persistence.*;
+import lombok.Data;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
 @Entity
+@Table(name = "question")
 public class Question {
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    private String text;             // Текст вопроса
-    private String correctAnswer;    // Правильный ответ
-    private String options;          // JSON массив вариантов (для множественного выбора)
+    // Текст вопроса
+    private String text;
 
+    // Двусторонняя связь с AnswerOption (вариантами ответов).
+    // CascadeType.ALL гарантирует, что при сохранении Question сохраняются и связанные AnswerOption.
+    @OneToMany(mappedBy = "question", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<AnswerOption> answerOptions = new ArrayList<>();
+
+    // Связь с тестом, для которого создан вопрос.
     @ManyToOne
-    private Test test;  // Связь с тестом
-
-    // Конструктор для создания вопроса с текстом и правильным ответом
-    public Question(String text, String correctAnswer, String options) {
-        this.text = text;
-        this.correctAnswer = correctAnswer;
-        this.options = options;
+    @JoinColumn(name = "test_id")
+    private Test test;
+    private List<String> options;
+    public List<String> getOptions() {
+        return options;
     }
-
-    // Пустой конструктор для JPA
-    public Question() {
+    // Дополнительный геттер, если требуется использовать getQuestionText() вместо getText()
+    public String getQuestionText() {
+        return text;
     }
 }

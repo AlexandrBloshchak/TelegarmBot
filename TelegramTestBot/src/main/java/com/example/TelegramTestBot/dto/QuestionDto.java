@@ -1,41 +1,33 @@
 package com.example.TelegramTestBot.dto;
 
+import com.example.TelegramTestBot.model.AnswerOption;
 import com.example.TelegramTestBot.model.Question;
 import com.example.TelegramTestBot.model.Test;
+import java.util.ArrayList;
+import java.util.List;
 
 public class QuestionDto {
     private String questionText;
     private String correctAnswer;
+    private List<String> options;
 
-    public QuestionDto() {}
+    // Конструкторы, геттеры и сеттеры...
 
-    public QuestionDto(String questionText, String correctAnswer) {
-        this.questionText = questionText;
-        this.correctAnswer = correctAnswer;
-    }
-
-    public String getQuestionText() {
-        return questionText;
-    }
-
-    public void setQuestionText(String questionText) {
-        this.questionText = questionText;
-    }
-
-    public String getCorrectAnswer() {
-        return correctAnswer;
-    }
-
-    public void setCorrectAnswer(String correctAnswer) {
-        this.correctAnswer = correctAnswer;
-    }
-
-    // Обновленный метод для создания Question с привязкой к Test
     public Question toQuestion(Test test) {
         Question question = new Question();
-        question.setText(this.questionText);      // Устанавливаем текст вопроса
-        question.setCorrectAnswer(this.correctAnswer); // Устанавливаем правильный ответ
-        question.setTest(test);  // Привязываем тест к вопросу
+        question.setText(this.questionText);
+        question.setTest(test);
+
+        List<AnswerOption> answerOptions = new ArrayList<>();
+        if (options != null && !options.isEmpty()) {
+            for (int i = 0; i < options.size(); i++) {
+                boolean correct = correctAnswer.equals(String.valueOf(i + 1));
+                AnswerOption option = new AnswerOption(options.get(i), i + 1, correct);
+                answerOptions.add(option);
+            }
+        }
+        question.setAnswerOptions(answerOptions);
+
         return question;
     }
 }

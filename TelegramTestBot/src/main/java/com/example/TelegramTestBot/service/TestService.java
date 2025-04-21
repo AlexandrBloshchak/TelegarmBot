@@ -1,21 +1,30 @@
 package com.example.TelegramTestBot.service;
 
 import com.example.TelegramTestBot.model.*;
+import com.example.TelegramTestBot.repository.AnswerOptionRepository;
+import com.example.TelegramTestBot.repository.QuestionRepository;
 import com.example.TelegramTestBot.repository.TestRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.List;
 
 @Service
 public class TestService {
     private final TestRepository testRepository;
     private final QuestionService questionService;
-
-    public TestService(TestRepository testRepository, QuestionService questionService) {
+    private final QuestionRepository questionRepository;
+    private final AnswerOptionRepository answerOptionRepository;
+    public TestService(TestRepository testRepository, QuestionService questionService, QuestionRepository questionRepository, AnswerOptionRepository answerOptionRepository) {
         this.testRepository = testRepository;
         this.questionService = questionService;
+        this.questionRepository = questionRepository;
+        this.answerOptionRepository = answerOptionRepository;
+    }
+    public List<Test> getTestsByTitle(String title) {
+        return testRepository.findByTitleIgnoreCase(title);  // Ищем тесты по названию (игнорируя регистр)
     }
 
     @Transactional
@@ -23,86 +32,56 @@ public class TestService {
         Test test = new Test();
         test.setCreator(creator);
         test.setTitle(testTitle);
-        test.setStatus(Test.TestStatus.DRAFT);  // Тест по умолчанию будет в статусе DRAFT
+        test.setStatus(Test.TestStatus.DRAFT);
         return testRepository.save(test);
+    }
+    public List<Question> getTestQuestionsByTitle(String title) {
+        Test test = testRepository.findByTitleIgnoreCase(title)
+                .stream().findFirst().orElse(null);  // Получаем первый тест по названию
+
+        if (test != null) {
+            return questionRepository.findByTestId(test.getId());  // Получаем вопросы для этого теста
+        }
+        return Collections.emptyList();  // Если тест не найден, возвращаем пустой список
+    }
+    public List<AnswerOption> getAnswersForQuestion(Question question) {
+        return answerOptionRepository.findByQuestionId(question.getId());  // Получаем варианты ответов для вопроса
     }
 
     public List<Test> getAvailableTests(User user) {
-        if ("CREATOR".equals(user.getRole())) {
-            return testRepository.findByCreatorId(user.getId());
-        }
-        return testRepository.findByStatus(Test.TestStatus.PUBLISHED);
+        return testRepository.findAll();
     }
 
     @Transactional
     public void addQuestionsToTest(Long testId, List<Question> questions) {
         testRepository.findById(testId).ifPresent(test -> {
             for (Question question : questions) {
-                question.setTest(test);  // Привязываем вопрос к тесту
-                questionService.save(question);  // Сохраняем вопрос
+                question.setTest(test);
+                questionService.save(question);
             }
-            test.setStatus(Test.TestStatus.PUBLISHED);  // После добавления вопросов можно опубликовать тест
+            test.setStatus(Test.TestStatus.PUBLISHED);
             testRepository.save(test);
         });
     }
 
     @Transactional
     public Test saveTest(Test test) {
-        return testRepository.save(test);  // Save and return the test object
+        return testRepository.save(test);
+    }
+    @Transactional(readOnly = true)
+    public List<Question> getTestQuestions(Test test) {
+        // Если список вопросов загружен лениво, можно явно запросить его,
+        // либо использовать дополнительный запрос через questionService или репозиторий.
+        return test.getQuestions();
     }
 
-
-    public TestResult evaluateTest(Test test, User user, List<String> answers) {
-        int score = 0;
-        List<Question> questions = test.getQuestions();
-
-        for (int i = 0; i < questions.size(); i++) {
-            if (questions.get(i).getCorrectAnswer().equals(answers.get(i))) {
-                score++;
-            }
-        }
-
-        TestResult result = new TestResult();
-        result.setUser(user);
-        result.setTest(test);
-        result.setScore(score);
-        result.setMaxScore(questions.size());
-        result.setCompletionDate(LocalDateTime.now());
-
-        return result;
-    }
-
-    // Сохранение вопроса в базе данных
-    public void saveQuestion(Question question) {
-        questionService.save(question);  // Используем QuestionService для сохранения
-    }
-
-    // Метод для парсинга файла и сохранения вопросов из файла
-    public List<Question> parseFileAndSaveQuestions(String filePath, Test test) {
-        List<Question> questions = parseFile(filePath);  // Парсим файл и получаем список вопросов
-
-        for (Question question : questions) {
-            question.setTest(test);  // Привязываем вопросы к тесту
-            questionService.save(question);  // Сохраняем вопросы
-        }
-        return questions;
-    }
     @Transactional
     public void addQuestionToTest(Long testId, Question question) {
         testRepository.findById(testId).ifPresent(test -> {
-            question.setTest(test);  // Привязываем вопрос к тесту
-            questionService.save(question);  // Сохраняем вопрос
-            test.setStatus(Test.TestStatus.PUBLISHED);  // После добавления вопросов можно опубликовать тест
+            question.setTest(test);
+            questionService.save(question);
+            test.setStatus(Test.TestStatus.PUBLISHED);
             testRepository.save(test);
         });
-    }
-
-    // Пример метода парсинга файла (заглушка для DOCX)
-    private List<Question> parseFile(String filePath) {
-        // Для реальной реализации добавьте логику парсинга файла в формат CSV/DOCX
-        return List.of(
-                new Question("Что такое Java?", "Программный язык", null),
-                new Question("Что такое Spring?", "Фреймворк для разработки", null)
-        );
     }
 }

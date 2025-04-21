@@ -17,16 +17,19 @@ public class UserService {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
     }
-
-    public boolean authenticate(String username, String password) {
-        return authenticate(username, password, null);
+    public void unlogin(Long chatId) {
+        userRepository.findByChatId(chatId).ifPresent(user -> {
+            user.setChatId(null);
+            userRepository.save(user);
+        });
     }
 
     public boolean authenticate(String username, String rawPassword, Long chatId) {
         return userRepository.findByUsername(username)
                 .map(user -> {
                     boolean match = passwordEncoder.matches(rawPassword, user.getPassword());
-                    if (match && chatId != null && user.getChatId() == null) {
+                    // Обновляем chatId, если авторизация успешна и chatId изменился или отсутствует
+                    if (match && chatId != null && !chatId.equals(user.getChatId())) {
                         user.setChatId(chatId);
                         userRepository.save(user);
                     }
@@ -34,6 +37,7 @@ public class UserService {
                 })
                 .orElse(false);
     }
+
 
     public Optional<User> getAuthenticatedUser(Long chatId) {
         return userRepository.findByChatId(chatId);

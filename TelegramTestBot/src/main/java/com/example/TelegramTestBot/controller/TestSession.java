@@ -1,72 +1,47 @@
 package com.example.TelegramTestBot.controller;
 
-import com.example.TelegramTestBot.dto.QuestionDto;
+import com.example.TelegramTestBot.model.Question;
+import com.example.TelegramTestBot.model.Test;
+
 import java.util.List;
-import java.util.ArrayList;
-import java.time.LocalDateTime;
 
+// Вспомогательный класс для хранения состояния прохождения теста
 public class TestSession {
-    private String testName; // Переименовано с testTitle на testName для соответствия
-    private List<QuestionDto> questions = new ArrayList<>();
-    private TestCreationState state = TestCreationState.NONE;
-    private LocalDateTime createdAt;
-    private LocalDateTime lastActivity;
+    private final Test test;
+    private final List<Question> questions;
+    private int index = 0;
+    private int correct = 0;
 
-    public TestSession() {
-        this.createdAt = LocalDateTime.now();
-        updateLastActivity();
+    TestSession(Test test, List<Question> questions) {
+        this.test = test;
+        this.questions = questions;
     }
 
-    public enum TestCreationState {
-        NONE,
-        AWAITING_TITLE,
-        AWAITING_FILE,
-        COMPLETE
+    Question getCurrentQuestion() {
+        return questions.get(index);
     }
 
-    // Добавляем необходимые методы
-    public boolean hasTestName() {
-        return testName != null && !testName.trim().isEmpty();
+    int getCurrentIndex() {
+        return index;
     }
 
-    public String getTestName() {
-        return testName;
+    void incrementCorrect() {
+        correct++;
     }
 
-    public void setTestName(String testName) {
-        this.testName = testName;
-        updateLastActivity();
+    void nextQuestion() {
+        index++;
     }
 
-    // Остальные методы класса
-    public List<QuestionDto> getQuestions() {
-        return new ArrayList<>(questions);
+    boolean hasNext() {
+        return index < questions.size();
     }
 
-    public void addQuestion(QuestionDto question) {
-        this.questions.add(question);
-        updateLastActivity();
+    int getCorrectCount() {
+        return correct;
     }
 
-    public TestCreationState getState() {
-        return state;
-    }
-
-    public void setState(TestCreationState state) {
-        this.state = state;
-        updateLastActivity();
-    }
-
-    private void updateLastActivity() {
-        this.lastActivity = LocalDateTime.now();
-    }
-
-    // Дополнительные полезные методы
-    public boolean hasQuestions() {
-        return !questions.isEmpty();
-    }
-
-    public int getQuestionCount() {
+    int getTotalQuestions() {
         return questions.size();
     }
 }
