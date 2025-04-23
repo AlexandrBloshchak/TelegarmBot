@@ -1,36 +1,42 @@
 package com.example.TelegramTestBot.model;
 
 import jakarta.persistence.*;
-import lombok.Data;
-import java.util.List;
+import jakarta.validation.constraints.NotBlank;
+import lombok.*;
 
 @Data
 @Entity
+@Builder
+@NoArgsConstructor(access = AccessLevel.PUBLIC)
+@AllArgsConstructor(access = AccessLevel.PRIVATE)
 @Table(name = "users")
 public class User {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false, unique = true)
+    // Маппинг на столбец login в БД
+    @Column(name = "login", nullable = false, unique = true)
+    @NotBlank
     private String username;
 
-    @Column(nullable = false, unique = true)
-    private String login;
-
     @Column(nullable = false)
+    @NotBlank
     private String password;
 
-    @Column(name = "full_name")
+    // Маппинг на full_name в БД
+    @Column(name = "full_name", nullable = false)
+    @NotBlank
     private String fullName;
 
-    private String role = "PARTICIPANT";
+    @Column(nullable = false)
+    @Builder.Default
+    private String role = "USER";
 
     @Column(name = "chat_id", unique = true)
     private Long chatId;
 
-    @OneToMany(mappedBy = "creator", cascade = CascadeType.ALL)
-    private List<Test> createdTests;
-
-    public User() {}
+    @Column(name = "is_authenticated")
+    @Builder.Default
+    private boolean authenticated = false;
 }

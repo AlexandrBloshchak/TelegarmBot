@@ -14,7 +14,7 @@ public interface TestRepository extends JpaRepository<Test, Long> {
     List<Test> findByTitleIgnoreCase(String title);
     @Query("SELECT t FROM Test t WHERE t.creator = :creator AND t.status = :status")
     List<Test> findByCreatorAndStatus(User creator, Test.TestStatus status);
-
+    List<Test> findByCreator(User creator);
     @Query("SELECT t FROM Test t WHERE t.title LIKE %:keyword% OR t.description LIKE %:keyword%")
     List<Test> searchByKeyword(@Param("keyword") String keyword);
 

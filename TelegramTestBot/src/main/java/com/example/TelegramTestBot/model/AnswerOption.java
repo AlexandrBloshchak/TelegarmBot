@@ -5,25 +5,28 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 @Data
-@NoArgsConstructor  // Lombok сгенерирует public AnswerOption() {}
+@NoArgsConstructor
 @Entity
 @Table(name = "answer_option")
 public class AnswerOption {
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(columnDefinition = "TEXT")
     private String text;
+
+    @Column(name = "option_number")
     private Integer optionNumber;
 
     @Column(name = "is_correct")
     private Boolean isCorrect = false;
 
-    @ManyToOne
-    @JoinColumn(name = "question_id")
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "question_id", nullable = false)
     private Question question;
 
-    // Конструктор для удобства создания
     public AnswerOption(String text, Integer optionNumber, Boolean isCorrect) {
         this.text = text;
         this.optionNumber = optionNumber;

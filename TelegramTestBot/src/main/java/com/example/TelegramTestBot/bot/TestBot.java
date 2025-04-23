@@ -4,23 +4,21 @@ import com.example.TelegramTestBot.controller.AuthController;
 import com.example.TelegramTestBot.controller.TestCreatorController;
 import com.example.TelegramTestBot.controller.TestParticipantController;
 import com.example.TelegramTestBot.model.User;
-import com.example.TelegramTestBot.service.UserService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
-import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.BotApiMethod;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
-import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
-import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
@@ -28,166 +26,197 @@ import java.util.Optional;
 @Component
 public class TestBot extends TelegramLongPollingBot {
 
+    private final String botUsername;
+    private final String botToken;
+
     private final AuthController authController;
-    private final UserService userService;
-    private final TestCreatorController creatorController;
     private final TestParticipantController participantController;
+    private final TestCreatorController   creatorController;
+    private final SessionService          sessionService;
 
-    @Value("${telegram.bot.username}")
-    private String botUsername;
+    public TestBot(@Value("${telegram.bot.username}") String botUsername,
+                   @Value("${telegram.bot.token}")    String botToken,
+                   AuthController authController,
+                   @Lazy TestParticipantController participantController,
+                   @Lazy TestCreatorController   creatorController,
+                   SessionService sessionService) {
 
-    @Value("${telegram.bot.token}")
-    private String botToken;
-
-    public TestBot(AuthController authController,
-                   UserService userService,
-                   TestCreatorController creatorController,
-                   TestParticipantController participantController) {
-        this.authController = authController;
-        this.userService = userService;
-        this.creatorController = creatorController;
+        this.botUsername         = botUsername;
+        this.botToken            = botToken;
+        this.authController      = authController;
         this.participantController = participantController;
+        this.creatorController     = creatorController;
+        this.sessionService        = sessionService;
     }
 
-    @Override
-    public String getBotUsername() {
-        return botUsername;
-    }
+    /* ------------------------------------------------------------------ */
 
-    @Override
-    public String getBotToken() {
-        return botToken;
-    }
+    @Override public String getBotUsername() { return botUsername; }
+    @Override public String getBotToken()    { return botToken;    }
+
+    /* ============================= MAIN ============================== */
 
     @Override
     public void onUpdateReceived(Update update) {
+
         try {
-            // 1) CallbackQuery (если есть) — сразу в AuthController
-            if (update.hasCallbackQuery()) {
-                CallbackQuery cq = update.getCallbackQuery();
-                Long chatId = cq.getMessage().getChatId();
-                log.info("Получен callbackQuery: id = {}, data = {}", cq.getId(), cq.getData());
-                SendMessage authResp = authController.handleAuth(update);
-                execute(authResp);
+            /* 1. Нас интересуют только сообщения */
+            if (!update.hasMessage()) return;
 
-                AnswerCallbackQuery answer = new AnswerCallbackQuery();
-                answer.setCallbackQueryId(cq.getId());
-                answer.setText("Получено");
-                execute(answer);
-                return;
-            }
+            Message msg   = update.getMessage();
+            Long    chat  = msg.getChatId();
+            String  text  = msg.hasText() ? msg.getText().trim() : "";
 
-            // 2) Только сообщения нас интересуют дальше
-            if (!update.hasMessage() || update.getMessage().getText() == null) {
-                return;
-            }
+            /* 2. Обрабатываем аутентификацию / регистрацию */
+            SendMessage authResp = authController.handleAuth(update);
+            if (authResp != null) {
+                executeMessage(authResp);
 
-            Message message = update.getMessage();
-            Long chatId = message.getChatId();
-            String normText = message.getText().trim().toLowerCase();
-
-            // 3) Авторизация
-            Optional<User> authUserOpt = userService.getAuthenticatedUser(chatId);
-            if (!authUserOpt.isPresent()) {
-                // если /login, «войти» и т.п. — в AuthController
-                if ("/login".equals(normText) || "войти".equals(normText) || "логин".equals(normText)
-                        || "/registr".equals(normText) || "зарегистрироваться".equals(normText) || "регистрация".equals(normText)) {
-                    SendMessage loginResp = authController.handleAuth(update);
-                    if (loginResp != null) execute(loginResp);
-                    return;
+                /* 2.1. Успех → меню */
+                if (authResp.getText().startsWith("✅")) {
+                    Optional<UserSession> s = sessionService.getSession(chat);
+                    if (s.isPresent()) sendMainMenu(chat, s.get().getUser());
+                    else               sendError(chat);
                 }
-                // иначе — просим авторизоваться
-                execute(getUnauthorizedMessage(chatId));
-                return;
-            }
-            User authUser = authUserOpt.get();
-
-            // 4) Создание теста (если в сессии TestCreatorController)
-            if (creatorController.isAwaitingTestName(chatId) || creatorController.isAwaitingDocument(chatId)) {
-                SendMessage createResp = creatorController.handleUpdate(update, authUser, null);
-                if (createResp != null) execute(createResp);
                 return;
             }
 
-            // 5) Если мы в середине логина через AuthController
-            if (authController.isInAuthSession(chatId)) {
-                SendMessage authResp = authController.handleAuth(update);
-                if (authResp != null) execute(authResp);
+            /* 3. Пользователь НЕ залогинен? → приветственный экран */
+            if (sessionService.getSession(chat).isEmpty()) {
+                if (text.equalsIgnoreCase("/login") || text.equalsIgnoreCase("войти")) {
+                    executeMessage(authController.startLoginProcess(chat));
+                } else if (text.equalsIgnoreCase("/registr") || text.equalsIgnoreCase("зарегистрироваться")) {
+                    executeMessage(authController.startRegistrationProcess(chat));
+                } else {
+                    sendWelcome(chat);
+                }
                 return;
             }
 
-            // 6) Теперь — участник: показываем/выбираем/начинаем тест
-            BotApiMethod<?> participantResp = participantController.handleUpdate(update, authUser);
-            if (participantResp != null) {
-                execute(participantResp);
+            /* 4. Пользователь авторизован */
+            UserSession session = sessionService.getSession(chat).orElseThrow();
+
+            /* 4.1. Выход */
+            if ("выйти из аккаунта".equalsIgnoreCase(text)) {
+                sessionService.removeSession(chat);
+                executeMessage(new SendMessage(chat.toString(), "✅ Вы вышли из аккаунта."));
+                sendWelcome(chat);
                 return;
             }
 
-            // 7) Остальные команды
-            if ("/reset".equals(normText)) {
-                creatorController.resetSession(chatId);
-                execute(new SendMessage(chatId.toString(), "Сессия сброшена. Введите /start для главного меню."));
-                return;
-            } else if ("/unlogin".equals(normText) || "выйти".equals(normText)) {
-                userService.unlogin(chatId);
-                execute(getUnauthorizedMessage(chatId));
-                return;
-            } else if ("/start".equals(normText)) {
-                execute(mainMenu(chatId, "Добро пожаловать, " + authUser.getFullName() + "!\nВыберите действие:"));
-                return;
-            } else if (normText.startsWith("создать тест") || normText.startsWith("/createtest")) {
-                // эта ветка уже не потребуется, если вы полностью перенесли логику в creatorController
-                creatorController.setAwaitingTestName(chatId);
-                execute(creatorController.promptTestName(chatId));
-                return;
-            }
-
-            // 8) По умолчанию — главное меню
-            execute(mainMenu(chatId, "Выберите действие, " + authUser.getFullName() + ":"));
+            /* 4.2. Дальнейшая логика */
+            handleAuthenticated(update, session);
 
         } catch (Exception e) {
-            log.error("Ошибка при обработке команды: {}", e.getMessage(), e);
-            Long chatId = update.hasMessage() ? update.getMessage().getChatId() : null;
-            if (chatId != null) sendErrorMessage(chatId, "Произошла ошибка при обработке команды. Попробуйте позже.");
+            log.error("Error processing update", e);
+            if (update.hasMessage())
+                sendError(update.getMessage().getChatId());
         }
     }
 
-    private SendMessage mainMenu(Long chatId, String welcomeMessage) {
-        return SendMessage.builder()
-                .chatId(chatId.toString())
-                .text(welcomeMessage)
-                .replyMarkup(mainKeyboardAuthorized())
-                .build();
+    /* ============================= AUTH USER ============================== */
+
+    private void handleAuthenticated(Update update, UserSession session) {
+
+        Long   chat = update.getMessage().getChatId();
+        User   user = session.getUser();
+        String text = update.getMessage().hasText() ? update.getMessage().getText().trim() : "";
+
+        switch (text.toLowerCase()) {
+            case "главное меню" -> { sendMainMenu(chat, user); return; }
+            case "мой профиль"  -> { showProfile(chat, user); return; }
+            case "создать тест" -> { creatorController.startTestCreation(chat, user); return; }
+            case "пройти тест"  -> {
+                BotApiMethod<?> resp = participantController.handleUpdate(update, user);
+                if (resp != null) executeMessage((SendMessage) resp);
+                return;
+            }
+        }
+
+        /* --- Логика создания / прохождения тестов -------- */
+        if (creatorController.isAwaitingTestName(chat) ||
+                creatorController.isAwaitingDocument(chat) ||
+                update.getMessage().hasDocument()) {
+
+            SendMessage resp = creatorController.handleUpdate(update, user);
+            if (resp != null) executeMessage(resp);
+            return;
+        }
+
+        BotApiMethod<?> part = participantController.handleUpdate(update, user);
+        if (part != null) { executeMessage((SendMessage) part); return; }
+
+        /* --- fallback: просто меню */
+        sendMainMenu(chat, user);
     }
 
-    private ReplyKeyboardMarkup mainKeyboardAuthorized() {
-        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
-        List<KeyboardRow> rows = new ArrayList<>();
+    /* ============================= UI HELPERS ============================== */
+
+    /* ---------- sendWelcome ------------ */
+    private void sendWelcome(Long chat) {
+        ReplyKeyboardMarkup kb = new ReplyKeyboardMarkup();
+        kb.setResizeKeyboard(true);
+        kb.setOneTimeKeyboard(true);
+
         KeyboardRow row = new KeyboardRow();
-        row.add("Создать тест");
-        row.add("Пройти тест");
-        row.add("Выйти");
-        rows.add(row);
-        keyboard.setKeyboard(rows);
-        keyboard.setResizeKeyboard(true);
-        return keyboard;
+        row.add("Войти");
+        row.add("Зарегистрироваться");
+        kb.setKeyboard(List.of(row));
+
+        SendMessage msg = new SendMessage(chat.toString(), "Добро пожаловать! Выберите действие:");
+        msg.setReplyMarkup(kb);
+
+        executeMessage(msg);
     }
 
-    private SendMessage getUnauthorizedMessage(Long chatId) {
-        return SendMessage.builder()
-                .chatId(chatId.toString())
-                .text("Вы не авторизованы. Пожалуйста, введите /login, 'войти', 'логин' или нажмите 'Войти'.")
-                .build();
+    /* ---------- sendMainMenu ------------ */
+    private void sendMainMenu(Long chat, User user) {
+        ReplyKeyboardMarkup kb = new ReplyKeyboardMarkup();
+        kb.setResizeKeyboard(true);
+
+        KeyboardRow r1 = new KeyboardRow();
+        r1.add("Создать тест");
+        r1.add("Пройти тест");
+
+        KeyboardRow r2 = new KeyboardRow();
+        r2.add("Мой профиль");
+        r2.add("Выйти из аккаунта");
+
+        kb.setKeyboard(List.of(r1, r2));
+
+        SendMessage msg = new SendMessage(
+                chat.toString(),
+                "👋 Привет, " + user.getFullName() + "! Выберите действие:"
+        );
+        msg.setReplyMarkup(kb);
+
+        executeMessage(msg);
     }
 
-    private void sendErrorMessage(Long chatId, String message) {
-        try {
-            execute(SendMessage.builder()
-                    .chatId(chatId.toString())
-                    .text(message)
-                    .build());
-        } catch (TelegramApiException e) {
-            log.error("Ошибка при отправке сообщения об ошибке: {}", e.getMessage());
-        }
+
+    private void showProfile(Long chat, User user) {
+        String created = creatorController.getUserCreatedTestsInfo(user);
+        int    passed  = participantController.getCompletedTestsCount(user);
+
+        String msg = "👤 Профиль:\n" +
+                "Имя: "   + user.getFullName() + '\n' +
+                "Логин: " + user.getUsername() + "\n\n" +
+                "📊 Созданные тесты:\n" + created + "\n\n" +
+                "✅ " + (passed > 0 ? "Пройденных тестов: " + passed
+                : "Вы еще не прошли ни одного теста");
+
+        executeMessage(new SendMessage(chat.toString(), msg));
+    }
+
+    /* ------------------------------------------------------------------ */
+
+    private void sendError(Long chat) {
+        executeMessage(new SendMessage(chat.toString(),
+                "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже."));
+    }
+
+    public void executeMessage(SendMessage msg) {
+        try { execute(msg); }
+        catch (TelegramApiException e) { log.error("Error sending message", e); }
     }
 }

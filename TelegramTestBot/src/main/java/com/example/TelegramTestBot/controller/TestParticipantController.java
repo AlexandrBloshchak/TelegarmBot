@@ -1,40 +1,77 @@
 package com.example.TelegramTestBot.controller;
 
-import com.example.TelegramTestBot.model.AnswerOption;
-import com.example.TelegramTestBot.model.Question;
-import com.example.TelegramTestBot.model.Test;
-import com.example.TelegramTestBot.model.User;
+import com.example.TelegramTestBot.model.*;
+import com.example.TelegramTestBot.repository.TestRepository;
+import com.example.TelegramTestBot.repository.TestResultRepository;
 import com.example.TelegramTestBot.service.AnswerOptionService;
+import com.example.TelegramTestBot.service.QuestionService;
 import com.example.TelegramTestBot.service.TestService;
+import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.meta.api.methods.BotApiMethod;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 
-import java.util.List;
-import java.util.Map;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
-@Slf4j
+@Transactional
 public class TestParticipantController {
 
     private final TestService testService;
+    private final QuestionService questionService;
     private final AnswerOptionService answerOptionService;
-
-    // сессии прохождения теста: chatId → сессия
+    private final TestResultRepository testResultRepository;
+    private final TestRepository testRepository;
     private final Map<Long, TestSession> sessions = new ConcurrentHashMap<>();
+    public String getUserPassedTestsInfo(User user) {
+        // Получаем все результаты тестов пользователя по user_id
+        List<TestResult> userResults = testResultRepository.findByUserId(user.getId());
 
-    /**
-     * Общая точка входа для всех сообщений от участника.
-     * Если есть активная сессия — обрабатываем ответ, иначе — команды /starttest и выбор теста.
-     */
+        if (userResults.isEmpty()) {
+            return "Вы еще не прошли ни одного теста";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        for (TestResult result : userResults) {
+            // Если тест не загружен через JPA, загружаем его отдельно
+            Test test = result.getTest();
+            if (test == null) {
+                test = testRepository.findById(result.getTestId()).orElse(null);
+                if (test == null) continue;
+            }
+
+            sb.append("• ")
+                    .append(test.getTitle())
+                    .append("\nРезультат: ")
+                    .append(result.getScore())
+                    .append("/")
+                    .append(result.getMaxScore())
+                    .append(" (")
+                    .append(String.format("%.1f", (result.getScore() * 100.0 / result.getMaxScore())))
+                    .append("%)")
+                    .append("\nДата: ")
+                    .append(result.getCompletionDate().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")))
+                    .append("\n\n");
+        }
+
+        return sb.toString();
+    }
+    public int getCompletedTestsCount(User user) {
+        return testResultRepository.countByUserId(user.getId());
+    }
     public BotApiMethod<?> handleUpdate(Update update, User user) {
         if (!update.hasMessage() || update.getMessage().getText() == null) {
             return null;
@@ -43,53 +80,66 @@ public class TestParticipantController {
         Long chatId = update.getMessage().getChatId();
         String text = update.getMessage().getText().trim();
 
-        // 1) Если у нас уже есть активная сессия для этого чата — это ответ на вопрос
+        // Обработка ответа на текущий вопрос теста
         if (sessions.containsKey(chatId)) {
-            return handleAnswer(chatId, text);
+            return handleAnswer(chatId, text, user);
         }
 
-        // 2) Команда запуска теста
+        // Обработка команды начала теста
         if (text.equalsIgnoreCase("/starttest") || text.equalsIgnoreCase("пройти тест")) {
-            List<Test> tests = testService.getAvailableTests(user);
-            if (tests.isEmpty()) {
-                return new SendMessage(chatId.toString(), "Пока нет ни одного теста для прохождения.");
-            }
-            return createTestSelectionKeyboard(chatId, tests);
+            return handleTestStartCommand(chatId, user);
         }
 
-        // 3) Выбор теста по названию (строка-кнопка из клавиатуры)
-        Test chosen = testService.getAvailableTests(user).stream()
+        // Обработка выбора конкретного теста
+        return handleTestSelection(chatId, user, text);
+    }
+
+    public BotApiMethod<?> handleTestStartCommand(Long chatId, User user) {
+        List<Test> tests = testService.getAvailableTests(user);
+        if (tests.isEmpty()) {
+            return new SendMessage(chatId.toString(), "Пока нет доступных тестов для прохождения.");
+        }
+        return createTestSelectionKeyboard(chatId, tests);
+    }
+
+    private BotApiMethod<?> handleTestSelection(Long chatId, User user, String text) {
+        return testService.getAvailableTests(user).stream()
                 .filter(t -> t.getTitle().equalsIgnoreCase(text))
                 .findFirst()
+                .map(test -> startTestSession(chatId, test))
                 .orElse(null);
-
-        if (chosen != null) {
-            return startTestSession(chatId, chosen);
-        }
-
-        // 4) Всё остальное — не наша зона, передаём дальше
-        return null;
     }
 
-
-    /** Старт сессии: сохраняем все вопросы и сразу шлём первый */
     private BotApiMethod<?> startTestSession(Long chatId, Test test) {
-        List<Question> questions = testService.getTestQuestions(test);
-        if (questions.isEmpty()) {
-            return new SendMessage(chatId.toString(), "В выбранном тесте нет вопросов.");
+        try {
+            // Получаем список всех вопросов для выбранного теста
+            List<Question> questions = questionService.getQuestionsByTestId(test.getId());
+
+            if (questions.isEmpty()) {
+                return new SendMessage(chatId.toString(), "В выбранном тесте нет вопросов.");
+            }
+
+            // Перемешиваем вопросы случайным образом
+            Collections.shuffle(questions);
+
+            // Создаём сессию для пользователя с перемешанными вопросами
+            TestSession session = new TestSession(test, questions);
+            sessions.put(chatId, session);
+
+            // Отправляем первый вопрос
+            return sendQuestion(chatId, session);
+        } catch (Exception e) {
+            log.error("Ошибка при запуске теста", e);
+            return new SendMessage(chatId.toString(),
+                    "Произошла ошибка при загрузке теста. Попробуйте позже.");
         }
-        TestSession session = new TestSession(test, questions);
-        sessions.put(chatId, session);
-        return sendQuestion(chatId, session);
     }
-    /**
-     * Строит ReplyKeyboardMarkup с кнопками-строками, где каждая строка — это название теста
-     */
+
     private BotApiMethod<?> createTestSelectionKeyboard(Long chatId, List<Test> tests) {
-        ReplyKeyboardMarkup kb = new ReplyKeyboardMarkup();
-        kb.setResizeKeyboard(true);
-        kb.setOneTimeKeyboard(false);
-        kb.setSelective(false);
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        keyboard.setResizeKeyboard(true);
+        keyboard.setOneTimeKeyboard(true);
+        keyboard.setSelective(true);
 
         List<KeyboardRow> rows = tests.stream()
                 .map(test -> {
@@ -99,79 +149,195 @@ public class TestParticipantController {
                 })
                 .collect(Collectors.toList());
 
-        kb.setKeyboard(rows);
+        keyboard.setKeyboard(rows);
 
         return SendMessage.builder()
                 .chatId(chatId.toString())
                 .text("Выберите тест:")
-                .replyMarkup(kb)
+                .replyMarkup(keyboard)
                 .build();
     }
 
-    /** Шлёт текущий вопрос и динамическую клавиатуру с вариантами */
     private BotApiMethod<?> sendQuestion(Long chatId, TestSession session) {
-        Question q = session.getCurrentQuestion();
-        List<AnswerOption> opts = answerOptionService.getAnswersForQuestion(q.getId());
+        Question currentQuestion = session.getCurrentQuestion();
+        List<AnswerOption> options = answerOptionService.getAnswersForQuestion(currentQuestion);
 
-        StringBuilder sb = new StringBuilder()
-                .append("Вопрос ").append(session.getCurrentIndex() + 1).append(":\n")
-                .append(q.getText()).append("\n\n");
+        StringBuilder questionText = new StringBuilder()
+                .append("Вопрос ").append(session.getCurrentIndex() + 1).append(" из ")
+                .append(session.getTotalQuestions()).append(":\n\n")
+                .append(currentQuestion.getText()).append("\n\n");
 
-        for (int i = 0; i < opts.size(); i++) {
-            sb.append(i + 1).append(") ").append(opts.get(i).getText()).append("\n");
+        for (int i = 0; i < options.size(); i++) {
+            questionText.append(i + 1).append(") ").append(options.get(i).getText()).append("\n");
         }
-        sb.append("\nВыберите ответ:");
+        questionText.append("\nВыберите номер правильного ответа:");
 
-        // Строим клавиатуру ровно из opts.size() кнопок
-        ReplyKeyboardMarkup kb = new ReplyKeyboardMarkup();
-        kb.setResizeKeyboard(true);
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        keyboard.setResizeKeyboard(true);
+        keyboard.setOneTimeKeyboard(true);
+
+        List<KeyboardRow> rows = new ArrayList<>();
         KeyboardRow row = new KeyboardRow();
-        for (int i = 1; i <= opts.size(); i++) {
+        for (int i = 1; i <= options.size(); i++) {
             row.add(String.valueOf(i));
+            if (i % 3 == 0) {
+                rows.add(row);
+                row = new KeyboardRow();
+            }
         }
-        kb.setKeyboard(List.of(row));
+        if (!row.isEmpty()) {
+            rows.add(row);
+        }
+        keyboard.setKeyboard(rows);
 
         return SendMessage.builder()
                 .chatId(chatId.toString())
-                .text(sb.toString())
-                .replyMarkup(kb)
+                .text(questionText.toString())
+                .replyMarkup(keyboard)
                 .build();
     }
 
-    /** Обработка ответа пользователя — проверка, переход к следующему или завершение */
-    private BotApiMethod<?> handleAnswer(Long chatId, String text) {
+    private BotApiMethod<?> handleAnswer(Long chatId, String answerText, User user) {
         TestSession session = sessions.get(chatId);
-        int choice;
-        try {
-            choice = Integer.parseInt(text) - 1;
-        } catch (NumberFormatException e) {
-            return new SendMessage(chatId.toString(), "Пожалуйста, введите номер варианта.");
+        if (session == null) {
+            return new SendMessage(chatId.toString(), "Сессия тестирования не найдена. Начните тест заново.");
         }
 
-        Question q = session.getCurrentQuestion();
-        List<AnswerOption> opts = answerOptionService.getAnswersForQuestion(q.getId());
+        try {
+            int selectedOption = Integer.parseInt(answerText.trim()) - 1;
+            List<AnswerOption> options = answerOptionService.getAnswersForQuestion(session.getCurrentQuestion());
 
-        if (choice >= 0 && choice < opts.size()) {
-            if (Boolean.TRUE.equals(opts.get(choice).getIsCorrect())) {
+            if (selectedOption < 0 || selectedOption >= options.size()) {
+                return new SendMessage(chatId.toString(),
+                        "Неверный номер варианта. Пожалуйста, выберите номер из предложенных.");
+            }
+
+            // Записываем ответ пользователя (1-based)
+            session.getUserAnswers().add(selectedOption + 1);
+
+            // Проверяем правильность
+            if (options.get(selectedOption).getIsCorrect()) {
                 session.incrementCorrect();
             }
-        } else {
-            // Неверный номер
-            return new SendMessage(chatId.toString(), "Неверный номер варианта, попробуйте ещё раз.");
-        }
 
-        session.nextQuestion();
-        if (session.hasNext()) {
-            return sendQuestion(chatId, session);
-        } else {
-            // Тест окончен
-            int score = session.getCorrectCount();
-            int total = session.getTotalQuestions();
-            sessions.remove(chatId);
+            // Если есть следующий вопрос — показываем его
+            if (session.nextQuestion()) {
+                return sendQuestion(chatId, session);
+            } else {
+                // Тест завершён — сохраняем результат в БД
+                testService.recordTestResult(
+                        user,
+                        session.getTest(),
+                        session.getCorrectCount(),
+                        session.getTotalQuestions()
+                );
+                // Отправляем финальную таблицу и сводку
+                return finishTestSession(chatId, session, user);
+            }
+        } catch (NumberFormatException e) {
             return new SendMessage(chatId.toString(),
-                    String.format("Тест завершён: %d из %d правильных.", score, total));
+                    "Пожалуйста, введите номер варианта ответа.");
         }
     }
 
+    private BotApiMethod<?> finishTestSession(Long chatId,
+                                              TestSession session,
+                                              User        user) {
+
+        /* 1. Завершаем и убираем сессию */
+        sessions.remove(chatId);
+
+        Test   test    = session.getTest();
+        int    total   = session.getTotalQuestions();
+        int    correct = session.getCorrectCount();
+        double perc    = total > 0 ? correct * 100.0 / total : 0.0;
+
+        String header = String.format("*Результаты теста!* %d/%d (%.1f%%)",
+                correct, total, perc);
+
+        /* ------------------------------------------------------------------ */
+        /* 2. Таблица с вопросами и ответами                                   */
+
+        List<List<InlineKeyboardButton>> kb = new ArrayList<>();
+
+        // заголовки
+        kb.add(List.of(
+                InlineKeyboardButton.builder().text("№ Вопрос").callbackData("noop").build(),
+                InlineKeyboardButton.builder().text("Ваш ответ").callbackData("noop").build(),
+                InlineKeyboardButton.builder().text("Правильный").callbackData("noop").build(),
+                InlineKeyboardButton.builder().text("Баллы").callbackData("noop").build()
+        ));
+
+        for (int i = 0; i < total; i++) {
+            Question q   = session.getAllQuestions().get(i);
+            int userAns  = session.getUserAnswers().get(i);                    // ответ пользователя
+            int corrAns  = q.getAnswerOptions().stream()
+                    .filter(AnswerOption::getIsCorrect)
+                    .map(AnswerOption::getOptionNumber)
+                    .findFirst().orElse(0);                            // правильный номер
+            int point    = userAns == corrAns ? 1 : 0;
+
+            String qText = (i + 1) + ". "
+                    + q.getText().replaceAll("(.{40})", "$1\n");          // перенос каждые 40 симв.
+
+            kb.add(List.of(
+                    InlineKeyboardButton.builder().text(qText).callbackData("noop").build(),
+                    InlineKeyboardButton.builder().text(String.valueOf(userAns)).callbackData("noop").build(),
+                    InlineKeyboardButton.builder().text(String.valueOf(corrAns)).callbackData("noop").build(),
+                    InlineKeyboardButton.builder().text(String.valueOf(point)).callbackData("noop").build()
+            ));
+        }
+
+        // итоговая строка
+        kb.add(List.of(
+                InlineKeyboardButton.builder()
+                        .text(String.format("Итого: %d/%d (%.1f%%)", correct, total, perc))
+                        .callbackData("noop")
+                        .build()
+        ));
+
+        /* ------------------------------------------------------------------ */
+        /* 3. Сводка по другим пользователям                                   */
+
+        List<UserResult> userResults = testService.getUserResults(test);
+        if (!userResults.isEmpty()) {
+
+            kb.add(List.of(InlineKeyboardButton.builder()
+                    .text("Сводка по пользователям:")
+                    .callbackData("noop").build()));
+
+            userResults.stream()
+                    .sorted(Comparator.comparingDouble(UserResult::getPercentage).reversed())
+                    .forEach(ur -> kb.add(List.of(
+                            InlineKeyboardButton.builder()
+                                    .text(String.format("%s: %.1f%%",
+                                            ur.getDisplayName(), ur.getPercentage()))
+                                    .callbackData("noop")
+                                    .build()
+                    )));
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* 4. Кнопки управления                                                */
+
+        kb.add(List.of(
+                InlineKeyboardButton.builder().text("Выйти в меню").callbackData("/start").build(),
+                InlineKeyboardButton.builder().text("Пройти заново").callbackData("/starttest").build()
+        ));
+
+        InlineKeyboardMarkup markup = InlineKeyboardMarkup.builder()
+                .keyboard(kb)
+                .build();
+
+        /* ------------------------------------------------------------------ */
+        /* 5. Финальное сообщение                                              */
+
+        return SendMessage.builder()
+                .chatId(chatId.toString())
+                .text(header)
+                .parseMode("Markdown")
+                .replyMarkup(markup)
+                .build();
+    }
 
 }
