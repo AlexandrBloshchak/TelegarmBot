@@ -240,114 +240,114 @@ public class TestParticipantController {
                     "Пожалуйста, введите номер варианта ответа.");
         }
     }
-        public BotApiMethod<?> finishTestSession(Long chatId,
-                                                 TestSession session,
-                                                 User        user) {
-            // 1) Убираем сессию
-            sessions.remove(chatId);
+    public BotApiMethod<?> finishTestSession(Long chatId,
+                                             TestSession session,
+                                             User        user) {
+        // 1) Убираем сессию
+        sessions.remove(chatId);
 
-            // 2) Считаем итоги
-            Test   test    = session.getTest();
-            int    total   = session.getTotalQuestions();
-            int    correct = session.getCorrectCount();
-            double perc    = total > 0 ? correct * 100.0 / total : 0.0;
+        // 2) Считаем итоги
+        Test   test    = session.getTest();
+        int    total   = session.getTotalQuestions();
+        int    correct = session.getCorrectCount();
+        double perc    = total > 0 ? correct * 100.0 / total : 0.0;
 
-            String header = String.format("*Результаты теста!* %d/%d (%.1f%%)",
-                    correct, total, perc);
+        String header = String.format("*Результаты теста!* %d/%d (%.1f%%)",
+                correct, total, perc);
 
-            // 3) Собираем inline-клавиатуру с деталями
-            List<List<InlineKeyboardButton>> inlineKb = new ArrayList<>();
+        // 3) Собираем inline-клавиатуру с деталями
+        List<List<InlineKeyboardButton>> inlineKb = new ArrayList<>();
 
-            // 3.1) Заголовки
-            inlineKb.add(List.of(
-                    InlineKeyboardButton.builder().text("№ Вопрос").callbackData("noop").build(),
-                    InlineKeyboardButton.builder().text("Ваш ответ").callbackData("noop").build(),
-                    InlineKeyboardButton.builder().text("Правильный").callbackData("noop").build(),
-                    InlineKeyboardButton.builder().text("Баллы").callbackData("noop").build()
-            ));
+        // 3.1) Заголовки
+        inlineKb.add(List.of(
+                InlineKeyboardButton.builder().text("№ Вопрос").callbackData("noop").build(),
+                InlineKeyboardButton.builder().text("Ваш ответ").callbackData("noop").build(),
+                InlineKeyboardButton.builder().text("Правильный").callbackData("noop").build(),
+                InlineKeyboardButton.builder().text("Баллы").callbackData("noop").build()
+        ));
 
-            // 3.2) Строки вопросов
-            for (int i = 0; i < total; i++) {
-                Question q      = session.getAllQuestions().get(i);
-                int      ua     = session.getUserAnswers().get(i);
-                int      ca     = q.getAnswerOptions().stream()
-                        .filter(AnswerOption::getIsCorrect)
-                        .map(AnswerOption::getOptionNumber)
-                        .findFirst().orElse(0);
-                int      pt     = ua == ca ? 1 : 0;
-                String   qText  = (i + 1) + ". " +
-                        q.getText().replaceAll("(.{40})", "$1\n");
+        // 3.2) Строки вопросов
+        for (int i = 0; i < total; i++) {
+            Question q      = session.getAllQuestions().get(i);
+            int      ua     = session.getUserAnswers().get(i);
+            int      ca     = q.getAnswerOptions().stream()
+                    .filter(AnswerOption::getIsCorrect)
+                    .map(AnswerOption::getOptionNumber)
+                    .findFirst().orElse(0);
+            int      pt     = ua == ca ? 1 : 0;
+            String   qText  = (i + 1) + ". " +
+                    q.getText().replaceAll("(.{40})", "$1\n");
 
-                inlineKb.add(List.of(
-                        InlineKeyboardButton.builder()
-                                .text(qText).callbackData("noop").build(),
-                        InlineKeyboardButton.builder()
-                                .text(String.valueOf(ua)).callbackData("noop").build(),
-                        InlineKeyboardButton.builder()
-                                .text(String.valueOf(ca)).callbackData("noop").build(),
-                        InlineKeyboardButton.builder()
-                                .text(String.valueOf(pt)).callbackData("noop").build()
-                ));
-            }
-
-            // 3.3) Итоговая строка
             inlineKb.add(List.of(
                     InlineKeyboardButton.builder()
-                            .text(String.format("Итого: %d/%d (%.1f%%)", correct, total, perc))
-                            .callbackData("noop")
-                            .build()
+                            .text(qText).callbackData("noop").build(),
+                    InlineKeyboardButton.builder()
+                            .text(String.valueOf(ua)).callbackData("noop").build(),
+                    InlineKeyboardButton.builder()
+                            .text(String.valueOf(ca)).callbackData("noop").build(),
+                    InlineKeyboardButton.builder()
+                            .text(String.valueOf(pt)).callbackData("noop").build()
             ));
-
-            // 3.4) Сводка по пользователям
-            List<UserResult> users = testService.getUserResults(test);
-            if (!users.isEmpty()) {
-                inlineKb.add(List.of(
-                        InlineKeyboardButton.builder()
-                                .text("Сводка по пользователям:")
-                                .callbackData("noop").build()
-                ));
-                users.stream()
-                        .sorted(Comparator.comparingDouble(UserResult::getPercentage).reversed())
-                        .forEach(ur -> inlineKb.add(List.of(
-                                InlineKeyboardButton.builder()
-                                        .text(String.format("%s: %.1f%%",
-                                                ur.getDisplayName(), ur.getPercentage()))
-                                        .callbackData("noop")
-                                        .build()
-                        )));
-            }
-
-            InlineKeyboardMarkup inlineMarkup = InlineKeyboardMarkup.builder()
-                    .keyboard(inlineKb)
-                    .build();
-
-            // 4) Первое сообщение — отчёт с inline-клавиатурой
-            SendMessage report = SendMessage.builder()
-                    .chatId(chatId.toString())
-                    .text(header)
-                    .parseMode("Markdown")
-                    .replyMarkup(inlineMarkup)
-                    .build();
-            testBot.executeMessage(report);
-
-            // 5) Второе сообщение — reply-клавиатура для управления
-            ReplyKeyboardMarkup replyKb = new ReplyKeyboardMarkup();
-            replyKb.setResizeKeyboard(true);
-
-            KeyboardRow row1 = new KeyboardRow();
-            row1.add("Выйти в меню");
-            KeyboardRow row2 = new KeyboardRow();
-            row2.add("Пройти заново");
-            replyKb.setKeyboard(List.of(row1, row2));
-
-            SendMessage controls = SendMessage.builder()
-                    .chatId(chatId.toString())
-                    .text("Выберите действие:")
-                    .replyMarkup(replyKb)
-                    .build();
-
-            // Возвращаем второе сообщение, его уже отправит TestBot.onUpdateReceived
-            return controls;
         }
+
+        // 3.3) Итоговая строка
+        inlineKb.add(List.of(
+                InlineKeyboardButton.builder()
+                        .text(String.format("Итого: %d/%d (%.1f%%)", correct, total, perc))
+                        .callbackData("noop")
+                        .build()
+        ));
+
+        // 3.4) Сводка по пользователям
+        List<UserResult> users = testService.getUserResults(test);
+        if (!users.isEmpty()) {
+            inlineKb.add(List.of(
+                    InlineKeyboardButton.builder()
+                            .text("Сводка по пользователям:")
+                            .callbackData("noop").build()
+            ));
+            users.stream()
+                    .sorted(Comparator.comparingDouble(UserResult::getPercentage).reversed())
+                    .forEach(ur -> inlineKb.add(List.of(
+                            InlineKeyboardButton.builder()
+                                    .text(String.format("%s: %.1f%%",
+                                            ur.getDisplayName(), ur.getPercentage()))
+                                    .callbackData("noop")
+                                    .build()
+                    )));
+        }
+
+        InlineKeyboardMarkup inlineMarkup = InlineKeyboardMarkup.builder()
+                .keyboard(inlineKb)
+                .build();
+
+        // 4) Первое сообщение — отчёт с inline-клавиатурой
+        SendMessage report = SendMessage.builder()
+                .chatId(chatId.toString())
+                .text(header)
+                .parseMode("Markdown")
+                .replyMarkup(inlineMarkup)
+                .build();
+        testBot.executeMessage(report);
+
+        // 5) Второе сообщение — reply-клавиатура для управления
+        ReplyKeyboardMarkup replyKb = new ReplyKeyboardMarkup();
+        replyKb.setResizeKeyboard(true);
+
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("Выйти в меню");
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("Пройти заново");
+        replyKb.setKeyboard(List.of(row1, row2));
+
+        SendMessage controls = SendMessage.builder()
+                .chatId(chatId.toString())
+                .text("Выберите действие:")
+                .replyMarkup(replyKb)
+                .build();
+
+        // Возвращаем второе сообщение, его уже отправит TestBot.onUpdateReceived
+        return controls;
+    }
 
 }
