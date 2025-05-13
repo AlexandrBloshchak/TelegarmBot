@@ -5,20 +5,19 @@ import com.example.TelegramTestBot.model.*;
 import com.example.TelegramTestBot.service.TestCreationService;
 import com.example.TelegramTestBot.service.TestResultService;
 import jakarta.transaction.Transactional;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
-import org.hibernate.Hibernate;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Document;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 
 import java.io.*;
@@ -33,392 +32,242 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Component
 public class TestCreatorController {
-    private static final Logger log = LoggerFactory.getLogger(TestCreatorController.class);
+
+    /* ─────────────────────────── DI ────────────────────────── */
+
     private final TestCreationService testCreationService;
-    private final TestResultService testResultService;
-    @Value("${telegram.bot.token}")
-    private String botToken;
+    private final TestResultService   testResultService;
 
-    // Ленивая инъекция TestBot чтобы не было цикла
-    private TestBot testBot;
+    @Value("${telegram.bot.token}")          private String botToken;
+    private TestBot                          testBot;       // ленивое внедрение, чтобы обойти цикл
 
-    // Поля для хранения состояний чата
-    private final Map<Long, String> pendingTestNames = new ConcurrentHashMap<>();
-    private final Map<Long, Boolean> awaitingTestName = new ConcurrentHashMap<>();
-    private final Map<Long, Boolean> awaitingDocument = new ConcurrentHashMap<>();
+    /* ─────────────────────────── state ─────────────────────── */
+
+    private final Map<Long,String>  pendingTestNames  = new ConcurrentHashMap<>();
+    private final Set<Long>         awaitingName      = ConcurrentHashMap.newKeySet();
+    private final Set<Long>         awaitingDocument  = ConcurrentHashMap.newKeySet();
+
+    /* ─────────────────────────── ctor ─────────────────────── */
 
     @Autowired
-    public TestCreatorController(TestCreationService testCreationService, TestResultService testResultService) {
+    public TestCreatorController(TestCreationService testCreationService,
+                                 TestResultService   testResultService) {
         this.testCreationService = testCreationService;
-        this.testResultService = testResultService;
+        this.testResultService   = testResultService;
     }
-
     @Autowired
-    public void setTestBot(@Lazy TestBot testBot) {
-        this.testBot = testBot;
+    public void setTestBot(@Lazy TestBot testBot) { this.testBot = testBot; }
+
+    /* ═════════════════════ public API ═════════════════════ */
+
+    public void startTestCreation(Long chat) {
+        awaitingName.add(chat);
+        testBot.executeMessage(promptTestName(chat));
     }
 
-    // Метод для сброса сессии для чата
-    public void resetSession(Long chatId) {
-        pendingTestNames.remove(chatId);
-        awaitingTestName.remove(chatId);
-        awaitingDocument.remove(chatId);
+    /** Главный обработчик входящих апдейтов, пока пользователь создаёт тест */
+    public SendMessage handleUpdate(Update up, User user) {
+        if (!up.hasMessage()) return null;
+
+        Message msg   = up.getMessage();
+        long    chat  = msg.getChatId();
+        String  text  = msg.hasText() ? msg.getText().trim() : "";
+
+        /* 0) отмена в любой момент */
+        if ("Отмена".equalsIgnoreCase(text)) return cancel(chat);
+
+        /* 1) ждём название */
+        if (awaitingName.contains(chat)) return handleTitle(chat, text);
+
+        /* 2) ждём файл */
+        if (awaitingDocument.contains(chat)) return handleDocument(chat, msg, user);
+
+        return null;        // не наше сообщение
     }
 
-    // Устанавливаем состояние ожидания имени теста
-    public void setAwaitingTestName(Long chatId) {
-        awaitingTestName.put(chatId, true);
+    /* ───────────────────────── приватная логика ───────────────────────── */
+
+    private SendMessage handleTitle(Long chat, String title) {
+        if (title.isBlank())
+            return promptTestName(chat);
+
+        if (title.length() > 100)
+            return simple(chat, "Название слишком длинное (макс. 100 символов).");
+
+        awaitingName.remove(chat);
+        awaitingDocument.add(chat);
+        pendingTestNames.put(chat, title);
+
+        log.info("Пользователь указал имя теста «{}»", title);
+        return promptDocument(chat);
     }
 
-    // Устанавливаем состояние ожидания документа после получения имени теста
-    public void setAwaitingDocument(Long chatId, String testName) {
-        pendingTestNames.put(chatId, testName);
-        awaitingTestName.remove(chatId);
-        awaitingDocument.put(chatId, true);
-    }
+    private SendMessage handleDocument(Long chat, Message msg, User user) {
+        if (!msg.hasDocument())
+            return simple(chat,"Пришлите DOCX-файл с вопросами.");
 
-    // Проверяем, ждем ли мы имя теста
-    public boolean isAwaitingTestName(Long chatId) {
-        return awaitingTestName.getOrDefault(chatId, false);
-    }
+        Document doc = msg.getDocument();
+        if (!doc.getFileName().toLowerCase().endsWith(".docx"))
+            return simple(chat,"Нужен именно *.docx* файл.");
 
-    // Проверяем, ждем ли мы документ
-    public boolean isAwaitingDocument(Long chatId) {
-        return awaitingDocument.getOrDefault(chatId, false);
-    }
+        if (doc.getFileSize() > 20_000_000)
+            return simple(chat,"Файл больше 20 МБ.");
 
-    // Метод возвращает сообщение с просьбой ввести имя теста
-    public SendMessage promptTestName(Long chatId) {
-        SendMessage message = new SendMessage();
-        message.setChatId(chatId.toString());
-        message.setText("Введите имя теста:");
-
-        ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
-        List<KeyboardRow> keyboard = new ArrayList<>();
-        KeyboardRow row = new KeyboardRow();
-        row.add("Отмена");
-        keyboard.add(row);
-        keyboardMarkup.setKeyboard(keyboard);
-        keyboardMarkup.setResizeKeyboard(true);
-        message.setReplyMarkup(keyboardMarkup);
-
-        return message;
-    }
-
-    // Метод возвращает сообщение с просьбой загрузить документ
-    public SendMessage promptDocument(Long chatId) {
-        SendMessage message = new SendMessage();
-        message.setChatId(chatId.toString());
-        message.setText("Название теста установлено. Теперь загрузите файл DOCX с вопросами.");
-
-        ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
-        List<KeyboardRow> keyboard = new ArrayList<>();
-        KeyboardRow row = new KeyboardRow();
-        row.add("Отмена");
-        keyboard.add(row);
-        keyboardMarkup.setKeyboard(keyboard);
-        keyboardMarkup.setResizeKeyboard(true);
-        message.setReplyMarkup(keyboardMarkup);
-
-        return message;
-    }
-    public SendMessage handleUpdate(Update update, User user) {
-        if (!update.hasMessage()) {
-            return null;
-        }
-
-        Message message = update.getMessage();
-        Long chatId = message.getChatId();
-
-        // Безопасное получение текста
-        String text = message.hasText() ? message.getText().trim() : "";
+        String testName = pendingTestNames.get(chat);
 
         try {
-            // 1. Обработка команды отмены
-            if ("Отмена".equalsIgnoreCase(text)) {
-                resetSession(chatId);
-                return createMessage(chatId, "Создание теста отменено.", true);
-            }
+            /* 1) скачиваем и парсим */
+            File tmp               = downloadFile(doc.getFileId());
+            List<Question> qList   = parseDocxFile(tmp);
+            tmp.delete();
 
-            // 2. Если ожидается имя теста
-            if (isAwaitingTestName(chatId)) {
-                if (text.isBlank()) {
-                    return promptTestName(chatId);
-                }
+            if (qList.isEmpty())
+                return simple(chat,"Не удалось извлечь вопросы. Проверьте формат документа.");
 
-                // Валидация названия теста
-                if (text.length() > 100) {
-                    return createMessage(chatId,
-                            "Название теста слишком длинное. Максимум 100 символов.", false);
-                }
+            /* 2) сохраняем тест */
+            Test t = new Test();
+            t.setTitle(testName);
+            t.setDescription("Создано: "+user.getUsername());
+            testCreationService.createTest(user,t,qList);
 
-                setAwaitingDocument(chatId, text);
-                log.info("Пользователь {} задал название теста: {}", user.getUsername(), text);
-                return promptDocument(chatId);
-            }
+            reset(chat);
+            return success(chat,"✅ Тест «%s» создан! Вопросов: %d".formatted(testName, qList.size()));
 
-            // 3. Если ожидается документ
-            if (isAwaitingDocument(chatId)) {
-                if (!message.hasDocument()) {
-                    return createMessage(chatId,
-                            "Ожидается загрузка файла DOCX с вопросами.", false);
-                }
-
-                Document doc = message.getDocument();
-                String fileName = doc.getFileName();
-
-                // Проверка формата файла
-                if (!fileName.toLowerCase().endsWith(".docx")) {
-                    return createMessage(chatId,
-                            "Пожалуйста, отправьте файл в формате DOCX.", false);
-                }
-
-                // Проверка размера файла (макс. 20MB)
-                if (doc.getFileSize() > 20_000_000) {
-                    return createMessage(chatId,
-                            "Файл слишком большой. Максимальный размер - 20MB", false);
-                }
-
-                String testName = pendingTestNames.get(chatId);
-                log.info("Начата обработка файла {} для теста '{}'", fileName, testName);
-
-                try {
-                    // Загрузка и обработка файла
-                    File tempFile = downloadFile(doc.getFileId());
-                    List<Question> questions = parseDocxFile(tempFile);
-
-                    if (!tempFile.delete()) {
-                        log.warn("Не удалось удалить временный файл: {}", tempFile.getPath());
-                    }
-
-                    if (questions.isEmpty()) {
-                        return createMessage(chatId,
-                                "Не удалось извлечь вопросы. Проверьте формат документа.", true);
-                    }
-
-                    // Создание теста
-                    Test test = new Test();
-                    test.setTitle(testName);
-                    test.setDescription("Создано: " + user.getUsername());
-
-                    testCreationService.createTest(user, test, questions);
-                    log.info("Тест '{}' создан, вопросов: {}", testName, questions.size());
-
-                    resetSession(chatId);
-                    return createSuccessMessage(chatId,
-                            "✅ Тест \"%s\" создан! Вопросов: %d".formatted(testName, questions.size()));
-
-                } catch (IOException e) {
-                    log.error("Ошибка обработки файла", e);
-                    return createMessage(chatId,
-                            "⚠️ Ошибка при обработке файла: " + e.getMessage(), true);
-                }
-            }
-
-            // 4. Если не в процессе создания теста
-            return null;
-
-        } catch (Exception e) {
-            log.error("Неожиданная ошибка при обработке запроса", e);
-            resetSession(chatId);
-            return createMessage(chatId,
-                    "⚠️ Произошла непредвиденная ошибка. Попробуйте позже.", true);
+        } catch (IOException e) {
+            log.error("Ошибка обработки файла",e);
+            reset(chat);
+            return simple(chat,"⚠️ Не удалось обработать файл: "+e.getMessage());
         }
     }
 
-// Вспомогательные методы:
+    /* ──────────────── helpers / UI ─────────────── */
 
-    private SendMessage createMessage(Long chatId, String text, boolean withMainMenu) {
-        SendMessage message = new SendMessage(chatId.toString(), text);
-        if (withMainMenu) {
-            message.setReplyMarkup(createMainMenuKeyboard());
-        }
-        return message;
+    private SendMessage promptTestName(Long c) {
+        return kb(c, "Введите имя теста:", List.of("Отмена"));
     }
-
-    private SendMessage createSuccessMessage(Long chatId, String text) {
-        SendMessage message = new SendMessage(chatId.toString(), text);
-        message.setReplyMarkup(createMainMenuKeyboard());
-        return message;
+    private SendMessage promptDocument(Long c) {
+        return kb(c,
+                "Название сохранено. Теперь загрузите DOCX с вопросами.",
+                List.of("Отмена"));
     }
+    private SendMessage simple  (Long c, String t){ return new SendMessage(c.toString(), t); }
+    private SendMessage success (Long c, String t){ return kb(c, t, List.of("Главное меню")); }
 
-    private ReplyKeyboardMarkup createMainMenuKeyboard() {
-        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
-        List<KeyboardRow> rows = new ArrayList<>();
+    private SendMessage kb(Long chat, String text, List<String> buttons) {
 
-        KeyboardRow row1 = new KeyboardRow();
-        row1.add("Создать тест");
-        row1.add("Пройти тест");
-
-        KeyboardRow row2 = new KeyboardRow();
-        row2.add("Мой профиль");
-
-        rows.add(row1);
-        rows.add(row2);
-
-        keyboard.setKeyboard(rows);
-        keyboard.setResizeKeyboard(true);
-        return keyboard;
-    }
-
-    public void startTestCreation(Long chatId, User user) {
-        // Устанавливаем флаг ожидания названия
-        setAwaitingTestName(chatId);
-        // Просим ввести название
-        SendMessage msg = promptTestName(chatId);
-        testBot.executeMessage(msg);
-    }
-
-    @Transactional
-    public String getUserCreatedTestsInfo(User user) {
-        // Получаем все результаты тестов для данного пользователя
-        List<TestResult> completedTests = testResultService.getCompletedTestsByUser(user.getId());
-
-        // Формируем строку с результатами тестов
-        StringBuilder resultBuilder = new StringBuilder();
-
-        DecimalFormat df = new DecimalFormat("#.##");  // Форматирование процента
-
-        for (TestResult result : completedTests) {
-            Test test = result.getTest();
-            if (test != null) {
-                // Вычисляем процент
-                double percentage = (result.getScore() * 100.0) / result.getMaxScore();
-                resultBuilder.append(test.getTitle())  // Название теста
-                        .append(" - Бал: ").append(result.getScore())  // Баллы пользователя
-                        .append(" / ").append(result.getMaxScore())  // Максимальный балл
-                        .append(" - ").append(df.format(percentage))  // Процент
-                        .append("%\n");
-            }
+        /* строим одну строку клавиатуры */
+        KeyboardRow row = new KeyboardRow();
+        for (String caption : buttons) {
+            row.add(new KeyboardButton(caption));     // ← оборачиваем строку в кнопку
         }
 
-        // Если нет пройденных тестов
-        if (completedTests.isEmpty()) {
-            return "❌ Вы еще не прошли ни одного теста.";
-        }
+        ReplyKeyboardMarkup markup = new ReplyKeyboardMarkup();
+        markup.setResizeKeyboard(true);
+        markup.setKeyboard(List.of(row));
 
-        return resultBuilder.toString();
+        return SendMessage.builder()
+                .chatId(chat.toString())
+                .text(text)
+                .replyMarkup(markup)
+                .build();
     }
+
+    private SendMessage cancel(Long chat){
+        reset(chat);
+        return kb(chat, "Создание теста отменено.", List.of("Главное меню"));
+    }
+
+    private void reset(Long chat){
+        awaitingName.remove(chat);
+        awaitingDocument.remove(chat);
+        pendingTestNames.remove(chat);
+    }
+
+    /* ─────────────── служебные ─────────────── */
 
     private File downloadFile(String fileId) throws IOException {
-        // 1. Получаем информацию о файле от Telegram API
-        String getFileUrl = "https://api.telegram.org/bot" + botToken + "/getFile?file_id=" + fileId;
-        URL url = new URL(getFileUrl);
-        HttpURLConnection con = (HttpURLConnection) url.openConnection();
-        con.setRequestMethod("GET");
+        String getUrl  = "https://api.telegram.org/bot"+botToken+"/getFile?file_id="+fileId;
+        String body    = new BufferedReader(new InputStreamReader(new URL(getUrl).openStream()))
+                .lines().collect(Collectors.joining());
+        Matcher m = Pattern.compile("\"file_path\":\"([^\"]+)\"").matcher(body);
+        if (!m.find()) throw new IOException("file_path not found");
+        String fileUrl = "https://api.telegram.org/file/bot"+botToken+"/"+m.group(1);
 
-        // 2. Читаем ответ от Telegram API
-        String response;
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(con.getInputStream()))) {
-            response = reader.lines().collect(Collectors.joining());
+        File tmp = File.createTempFile("upload_",".docx");
+        try (InputStream in = new URL(fileUrl).openStream()) {
+            Files.copy(in,tmp.toPath(), StandardCopyOption.REPLACE_EXISTING);
         }
-
-        // 3. Извлекаем file_path из JSON-ответа
-        Pattern pattern = Pattern.compile("\"file_path\"\\s*:\\s*\"(.*?)\"");
-        Matcher matcher = pattern.matcher(response);
-        if (!matcher.find()) {
-            throw new IOException("Не удалось получить путь к файлу из ответа Telegram");
-        }
-        String filePath = matcher.group(1);
-
-        // 4. Формируем URL для скачивания файла
-        String fileDownloadUrl = "https://api.telegram.org/file/bot" + botToken + "/" + filePath;
-        URL downloadUrl = new URL(fileDownloadUrl);
-
-        // 5. Создаем временный файл
-        File tempFile = File.createTempFile("test_", ".docx");
-        try (InputStream in = downloadUrl.openStream()) {
-            Files.copy(in, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        }
-
-        // 6. Проверяем, что файл действительно DOCX
-        try (FileInputStream fis = new FileInputStream(tempFile);
-             XWPFDocument doc = new XWPFDocument(fis)) {
-            // Если файл открылся без ошибок - он валидный
-        } catch (Exception e) {
-            tempFile.delete();
-            throw new IOException("Недопустимый формат файла DOCX", e);
-        }
-
-        return tempFile;
+        return tmp;
     }
-    private List<Question> parseDocxFile(File file) throws IOException {
-        List<Question> questions = new ArrayList<>();
 
-        try (FileInputStream fis = new FileInputStream(file);
-             XWPFDocument document = new XWPFDocument(fis)) {
+    private List<Question> parseDocxFile(File f) throws IOException {
+        List<Question> qList = new ArrayList<>();
+        try (XWPFDocument doc = new XWPFDocument(new FileInputStream(f))) {
 
-            // Собираем все непустые строки
-            List<String> lines = document.getParagraphs().stream()
-                    .map(XWPFParagraph::getText)
-                    .map(String::trim)
-                    .filter(s -> !s.isEmpty())
-                    .collect(Collectors.toList());
+            List<String> lines = doc.getParagraphs().stream()
+                    .map(XWPFParagraph::getText).map(String::trim)
+                    .filter(s -> !s.isEmpty()).toList();
 
-            Question currentQuestion = null;
-            List<AnswerOption> currentOptions = null;
-            StringBuilder questionText = new StringBuilder();
+            Question curQ = null;
+            List<AnswerOption> opts = null;
+            StringBuilder qTxt = new StringBuilder();
 
-            for (String line : lines) {
-                // 1) Новый вопрос: "1. Что-то?"
-                if (line.matches("^\\d+\\.\\s*.*\\?$")) {
-                    // Сохраняем предыдущий
-                    if (currentQuestion != null) {
-                        currentQuestion.setText(questionText.toString().trim());
-                        currentQuestion.setAnswerOptions(currentOptions);
-                        questions.add(currentQuestion);
+            for (String ln : lines) {
+                if (ln.matches("^\\d+\\.\\s*.*\\?$")) {                 // новый вопрос
+                    if (curQ!=null) {
+                        curQ.setText(qTxt.toString().trim());
+                        curQ.setAnswerOptions(opts);
+                        qList.add(curQ);
                     }
-                    // Начинаем новый
-                    currentQuestion = new Question();
-                    currentOptions = new ArrayList<>();
-                    questionText.setLength(0);
-                    // Убираем номер и точку
-                    questionText.append(line.replaceFirst("^\\d+\\.\\s*", ""));
+                    curQ  = new Question();
+                    opts  = new ArrayList<>();
+                    qTxt.setLength(0);
+                    qTxt.append(ln.replaceFirst("^\\d+\\.\\s*",""));
                     continue;
                 }
-
-                // 2) Вариант ответа: "1. Текст..."
-                if (line.matches("^\\d+\\.\\s+.*")) {
-                    String text = line.replaceFirst("^\\d+\\.\\s+", "");
-                    AnswerOption opt = new AnswerOption();
-                    opt.setQuestion(currentQuestion);
-                    opt.setText(text);
-                    opt.setOptionNumber(currentOptions.size() + 1);
-                    opt.setIsCorrect(false);
-                    currentOptions.add(opt);
+                if (ln.matches("^\\d+\\.\\s+.*")) {                      // вариант ответа
+                    AnswerOption ao = new AnswerOption();
+                    ao.setText(ln.replaceFirst("^\\d+\\.\\s+",""));
+                    ao.setOptionNumber(opts.size()+1);
+                    ao.setIsCorrect(false);
+                    opts.add(ao);
                     continue;
                 }
-
-                // 3) Строка "Ответ X"
-                if (line.matches("^(Ответ|Правильный ответ)[\\s:]*\\d+.*")) {
-                    // Извлекаем цифру
-                    int correct = Integer.parseInt(line.replaceAll("\\D+", ""));
-                    if (currentOptions != null && correct >= 1 && correct <= currentOptions.size()) {
-                        currentOptions.get(correct - 1).setIsCorrect(true);
-                    }
+                if (ln.matches("^(Ответ|Правильный).*\\d+.*")) {        // строка "Ответ X"
+                    int idx = Integer.parseInt(ln.replaceAll("\\D+",""));
+                    if (idx>=1 && idx<=opts.size()) opts.get(idx-1).setIsCorrect(true);
                     continue;
                 }
-
-                // 4) Продолжение текста вопроса
-                if (currentQuestion != null) {
-                    questionText.append(" ").append(line);
-                }
+                qTxt.append(' ').append(ln);                            // хвост вопроса
             }
-
-            // Сохраняем последний вопрос
-            if (currentQuestion != null) {
-                currentQuestion.setText(questionText.toString().trim());
-                currentQuestion.setAnswerOptions(currentOptions);
-                questions.add(currentQuestion);
+            if (curQ!=null){
+                curQ.setText(qTxt.toString().trim());
+                curQ.setAnswerOptions(opts);
+                qList.add(curQ);
             }
-        } catch (Exception e) {
-            log.error("Ошибка при парсинге DOCX файла", e);
-            throw new IOException("Ошибка при разборе файла DOCX", e);
         }
+        return qList;
+    }
 
-        log.info("Из файла извлечено {} вопросов", questions.size());
-        return questions;
+    /* ─────────────── статистика пользователя ─────────────── */
+
+    @Transactional
+    public String getUserCreatedTestsInfo(User u){
+        List<TestResult> res = testResultService.getCompletedTestsByUser(u.getId());
+        if (res.isEmpty()) return "❌ Вы ещё не прошли ни одного теста.";
+
+        DecimalFormat df = new DecimalFormat("#.#");
+        StringBuilder sb = new StringBuilder();
+        for (TestResult r:res){
+            double pct = r.getScore()*100.0/r.getMaxScore();
+            sb.append("• ").append(r.getTest().getTitle())
+                    .append(" — ").append(r.getScore()).append('/')
+                    .append(r.getMaxScore()).append(" (")
+                    .append(df.format(pct)).append("%)\n");
+        }
+        return sb.toString();
     }
 }

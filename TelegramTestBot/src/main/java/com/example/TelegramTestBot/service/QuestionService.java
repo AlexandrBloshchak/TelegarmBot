@@ -21,7 +21,19 @@ public class QuestionService {
     public Question save(Question question) {
         return questionRepository.save(question);
     }
+    @Transactional
+    public Question addQuestion(Test test, String text) {
+        Question q = new Question();
+        q.setTest(test);
+        q.setText(text);
+        return questionRepository.save(q);
+    }
 
+    @Transactional
+    public void updateQuestion(Question q, String newText) {
+        q.setText(newText);
+        questionRepository.save(q);
+    }
     @Transactional(readOnly = true)
     public List<Question> getQuestionsByTestId(Long testId) {
         return questionRepository.findQuestionsByTestIdOrdered(testId);

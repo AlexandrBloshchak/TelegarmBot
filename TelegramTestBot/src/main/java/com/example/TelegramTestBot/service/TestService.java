@@ -109,7 +109,19 @@ public class TestService {
     public List<Test> getTestsCreatedByUser(User creator) {
         return testRepository.findByCreator(creator);          // нужен метод в репо
     }
-
+    @Transactional(readOnly = true)
+    public long getQuestionCount(Test test) {
+        // чтобы не гонять лишний запрос, если коллекция уже загружена —
+        if (test.getQuestions() != null && !test.getQuestions().isEmpty()) {
+            return test.getQuestions().size();
+        }
+        return questionService.getQuestionsByTestId(test.getId()).size();
+    }
+    @Transactional
+    public void renameTest(Test test, String newTitle) {
+        test.setTitle(newTitle);
+        testRepository.save(test);
+    }
     /** найти тест по названию и автору */
     @Transactional(readOnly = true)
     public Optional<Test> findByTitleAndUser(String title, User creator) {

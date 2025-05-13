@@ -1,4 +1,5 @@
 package com.example.TelegramTestBot.bot;
+import com.example.TelegramTestBot.controller.TestEditorController;
 
 import com.example.TelegramTestBot.controller.AuthController;
 import com.example.TelegramTestBot.controller.TestCreatorController;
@@ -37,7 +38,7 @@ public class TestBot extends TelegramLongPollingBot {
     private final TestService               testService;
     private final UserService               userService;
     private final SessionService            sessionService;
-
+    private final TestEditorController editorController;
     /* ─────────────────────────── state ─────────────────────── */
 
     /** чат → тест, для которого сейчас показываем редактор                   */
@@ -52,22 +53,25 @@ public class TestBot extends TelegramLongPollingBot {
     public TestBot(
             @Value("${telegram.bot.username}") String botUsername,
             @Value("${telegram.bot.token}")    String botToken,
-            AuthController            authController,
-            @Lazy TestCreatorController   creatorController,
+            AuthController               authController,
+            @Lazy TestCreatorController  creatorController,
             @Lazy TestParticipantController participantController,
-            TestService               testService,
-            UserService               userService,
-            SessionService            sessionService) {
+            @Lazy TestEditorController   editorController,          // 👈 НОВОЕ
+            TestService                  testService,
+            UserService                  userService,
+            SessionService               sessionService) {
 
         this.botUsername         = botUsername;
         this.botToken            = botToken;
         this.authController      = authController;
         this.creatorController   = creatorController;
         this.participantController = participantController;
+        this.editorController    = editorController;               // 👈 НОВОЕ
         this.testService         = testService;
         this.userService         = userService;
         this.sessionService      = sessionService;
     }
+
 
     /* ─────────────────────────── TG API idents ────────────── */
 
@@ -78,114 +82,37 @@ public class TestBot extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
+        if (!update.hasMessage()) return;
 
-        try {
-            /* 1) обрабатываем только сообщения */
-            if (!update.hasMessage()) return;
+        Message msg   = update.getMessage();
+        long    chat  = msg.getChatId();
+        String  text  = msg.hasText() ? msg.getText().trim() : "";
 
-            Message msg  = update.getMessage();
-            long    chat = msg.getChatId();
-            String  txt  = msg.hasText() ? msg.getText().trim() : "";
+        /* 1) авторизация / регистрация */
+        SendMessage a = authController.handleAuth(update);
+        if (a != null) { executeMessage(a); return; }
 
-            /* 2) auth / регистрация */
-            SendMessage authAns = authController.handleAuth(update);
-            if (authAns != null) {
-                executeMessage(authAns);
-                if (authAns.getText().startsWith("✅"))
-                    sessionService.getSession(chat)
-                            .ifPresent(s -> sendMainMenu(chat, s.getUser()));
-                return;
-            }
+        /* 2) если пользователь ещё не залогинен */
+        Optional<UserSession> maybe = sessionService.getSession(chat);
+        if (maybe.isEmpty()) { sendWelcome(chat); return; }
 
-            /* 3) пользователь не авторизован → показ приветствия */
-            if (sessionService.getSession(chat).isEmpty()) {
-                if (txt.equalsIgnoreCase("/login") || txt.equalsIgnoreCase("войти"))
-                    executeMessage(authController.startLoginProcess(chat));
-                else if (txt.equalsIgnoreCase("/registr") || txt.equalsIgnoreCase("зарегистрироваться"))
-                    executeMessage(authController.startRegistrationProcess(chat));
-                else
-                    sendWelcome(chat);
-                return;
-            }
+        User user = maybe.get().getUser();
 
-            /* 4) пользователь авторизован */
-            UserSession us = sessionService.getSession(chat).orElseThrow();
-            User user      = us.getUser();
+        /* 3) если мы внутри редактора ─ переадресуем контроллеру */
+        if (editorController.isInside(chat)) {          // 👈 было isInsideEditor
+            SendMessage ans = editorController.handle(update);   // 👈 было handleUpdate
+            if (ans != null) executeMessage(ans);
+            return;
+        }
 
-            /* 4.1) выход */
-            if (txt.equalsIgnoreCase("выйти из аккаунта")) {
-                sessionService.removeSession(chat);
-                executeMessage(new SendMessage(String.valueOf(chat), "✅ Вы вышли."));
-                sendWelcome(chat);
-                return;
-            }
 
-            /* 4.2) «главное меню» / «вернуться…» */
-            if (txt.equalsIgnoreCase("главное меню") || txt.equalsIgnoreCase("вернуться в меню")) {
-                sendMainMenu(chat, user);
-                return;
-            }
-
-            /* 4.3) «мой профиль» */
-            if (txt.equalsIgnoreCase("мой профиль")) {
-                showProfile(chat, user);
-                return;
-            }
-
-            /* 4.4) «мои тесты» */
-            if (txt.equalsIgnoreCase("мои тесты")) {
-                showUserTests(chat, user);
-                return;
-            }
-
-            /* 4.5) мы НА этапе выбора теста после «мои тесты» */
-            if (awaitingTestSelection.remove(chat)) {
-                onTestChosen(chat, user, txt);
-                return;
-            }
-
-            /* 4.6) мы НА этапе выбора пользователя в статистике */
-            if (awaitingUserSelection.remove(chat)) {
-                pendingTestActions.computeIfPresent(chat,
-                        (c, t) -> { showDetailedStatsFor(chat, t, txt); return t; });
-                return;
-            }
-
-            /* 4.7) внутри редактора конкретного теста */
-            if (pendingTestActions.containsKey(chat)) {
-                handleTestActions(chat, user, txt);
-                return;
-            }
-
-            /* 4.8) создание теста (ожидание имя / docx) */
-            if (creatorController.isAwaitingTestName(chat) ||
-                    creatorController.isAwaitingDocument(chat) ||
-                    msg.hasDocument()) {
-                SendMessage r = creatorController.handleUpdate(update, user);
-                if (r != null) executeMessage(r);
-                return;
-            }
-
-            /* 4.9) прохождение тестов */
-            BotApiMethod<?> p = participantController.handleUpdate(update, user);
-            if (p != null) { executeMessage((SendMessage) p); return; }
-
-            /* 4.10) команды «создать» / «пройти» из главного меню */
-            if (txt.equalsIgnoreCase("создать тест")) {
-                creatorController.startTestCreation(chat, user);  return;
-            }
-            if (txt.equalsIgnoreCase("пройти тест")) {
-                SendMessage r = (SendMessage) participantController.handleUpdate(update, user);
-                if (r != null) executeMessage(r); return;
-            }
-
-            /* fallback */
-            executeMessage(new SendMessage(String.valueOf(chat),
-                    "Не понимаю команду. Выберите пункт меню или нажмите «Главное меню»."));
-
-        } catch (Exception e) {
-            log.error("update fail", e);
-            if (update.hasMessage()) sendError(update.getMessage().getChatId());
+        /* 4) … дальше обычное меню бота … */
+        switch (text.toLowerCase()) {
+            case "мои тесты" -> showUserTests(chat, user);
+            case "создать тест" -> creatorController.startTestCreation(chat);
+            case "пройти тест"  -> executeMessage(
+                    (SendMessage) participantController.handleUpdate(update,user));
+            default            -> sendMainMenu(chat,user);
         }
     }
 
@@ -241,29 +168,43 @@ public class TestBot extends TelegramLongPollingBot {
         // Отправляем сообщение
         executeMessage(msg);
     }
-
-
-    /* ――― шаг 1: вывод списка тестов ――― */
     private void showUserTests(Long chat, User u) {
-        List<Test> list = testService.getTestsCreatedByUser(u);
-        if (list.isEmpty()) {
-            executeMessage(new SendMessage(String.valueOf(chat),
+
+        List<Test> tests = testService.getTestsCreatedByUser(u);
+        if (tests.isEmpty()) {
+            executeMessage(new SendMessage(chat.toString(),
                     "У вас пока нет созданных тестов."));
             return;
         }
-        List<KeyboardRow> rows = new ArrayList<>();
-        for (Test t : list) {
-            KeyboardRow r = new KeyboardRow();
-            r.add(t.getTitle() + " ▸ Редактор");
-            rows.add(r);
+
+        /* 1) текстовая сводка */
+        StringBuilder body = new StringBuilder("*Ваши тесты:*\n\n");
+        for (Test t : tests) {
+            body.append("• ").append(t.getTitle())
+                    .append(" — вопросов: ").append(testService.getQuestionCount(t))
+                    .append('\n');
         }
+        executeMessage(SendMessage.builder()
+                .chatId(chat.toString())
+                .text(body.toString())
+                .parseMode("Markdown")
+                .build());
+
+        /* 2) клавиатура */
+        List<KeyboardRow> rows = new ArrayList<>();
+        for (Test t : tests) rows.add(kRow(t.getTitle() + " ▸ Редактор"));
         rows.add(kRow("Главное меню"));
+
         ReplyKeyboardMarkup kb = keyboard(rows);
-        SendMessage msg = new SendMessage(chat.toString(), "Выберите тест:");
-        msg.setReplyMarkup(kb);          // setReplyMarkup вернёт void — это нормально
-        executeMessage(msg);
+        SendMessage ask = new SendMessage(chat.toString(),
+                "Выберите тест для редактирования:");
+        ask.setReplyMarkup(kb);          // setReplyMarkup возвращает void
+        executeMessage(ask);
+
         awaitingTestSelection.add(chat);
     }
+    private KeyboardRow row(String b){ KeyboardRow r=new KeyboardRow(); r.add(b); return r; }
+
 
     /* ――― шаг 2: пользователь выбрал тест ――― */
     private void onTestChosen(long chat, User u, String btnText) {
