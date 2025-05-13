@@ -105,8 +105,49 @@ public class TestService {
         testResultRepository.save(tr);
     }
 
+    @Transactional(readOnly = true)
+    public List<Test> getTestsCreatedByUser(User creator) {
+        return testRepository.findByCreator(creator);          // нужен метод в репо
+    }
 
+    /** найти тест по названию и автору */
+    @Transactional(readOnly = true)
+    public Optional<Test> findByTitleAndUser(String title, User creator) {
+        return testRepository.findByTitleIgnoreCaseAndCreator(title, creator);
+    }
 
+    /** «Удалить тест» (каскад/FK заведены в JPA-модели) */
+    @Transactional
+    public void deleteTest(Test test) {
+        testRepository.delete(test);
+    }
+
+    /** краткая сводка: кто проходил тест (score – лучшее значение пользователя) */
+    @Transactional(readOnly = true)
+    public List<UserResult> getTestParticipants(Test test) {
+        // получаем все результаты
+        List<TestResult> results = testResultRepository.findByTest(test);
+        Map<Long, UserResult> map = new HashMap<>();
+        for (TestResult r : results) {
+            long uid   = r.getUser().getId();
+            int  score = r.getScore() != null ? r.getScore() : 0;
+            int  best  = map.containsKey(uid) ? map.get(uid).getScore() : -1;
+            if (score > best) {
+                map.put(uid, new UserResult(r.getUser().getUsername(), score, uid));
+            }
+        }
+        return new ArrayList<>(map.values());
+    }
+
+    /** все результаты конкретного пользователя по данному тесту */
+    @Transactional(readOnly = true)
+    public List<TestResult> getResultsByTestAndUser(Test test, User user) {
+        return testResultRepository.findByTestAndUser(test, user);
+    }
+    public List<TestResult> getCompletedTestsForUser(User user) {
+        // Получаем результаты тестов, которые прошел пользователь
+        return testResultRepository.findByUser(user);
+    }
     @Transactional(readOnly = true)
     public List<TestResult> getResultsByTest(Test test) {
         return testResultRepository.findByTest(test);

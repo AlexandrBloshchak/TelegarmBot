@@ -2,7 +2,7 @@ package com.example.TelegramTestBot.service;
 
 import com.example.TelegramTestBot.model.User;
 import com.example.TelegramTestBot.repository.UserRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -40,10 +40,10 @@ public class UserService {
         });
     }
 
-    /**
-     * Проверка логина/пароля и привязка Telegram-chatId к пользователю.
-     * Возвращает {@code true}, если вход успешен.
-     */
+    @Transactional(readOnly = true)
+    public Optional<User> findByUsername(String username) {
+        return userRepository.findByUsername(username);   // нужен соответствующий метод в UserRepository
+    }
     @Transactional
     public boolean authenticate(String login, String password, Long chatId) {
         return userRepository.findByUsername(login)

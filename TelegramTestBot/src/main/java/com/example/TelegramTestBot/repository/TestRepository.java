@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.util.List;
+import java.util.Optional;
 
 public interface TestRepository extends JpaRepository<Test, Long> {
     List<Test> findByStatus(Test.TestStatus status);
@@ -17,6 +18,6 @@ public interface TestRepository extends JpaRepository<Test, Long> {
     List<Test> findByCreator(User creator);
     @Query("SELECT t FROM Test t WHERE t.title LIKE %:keyword% OR t.description LIKE %:keyword%")
     List<Test> searchByKeyword(@Param("keyword") String keyword);
-
+    Optional<Test> findByTitleIgnoreCaseAndCreator(String title, User creator);
     boolean existsByTitleAndCreator(String title, User creator);
 }
