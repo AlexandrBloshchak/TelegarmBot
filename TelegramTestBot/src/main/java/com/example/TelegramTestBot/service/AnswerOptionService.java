@@ -6,20 +6,13 @@ import com.example.TelegramTestBot.repository.AnswerOptionRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
-import java.util.Comparator;
 import java.util.List;
 
-/**
- * Сервис для управления вариантами ответов.
- */
 @Service
 @RequiredArgsConstructor
 public class AnswerOptionService {
 
     private final AnswerOptionRepository answerOptionRepository;
-
-    /* ─────────────── чтение ─────────────── */
 
     @Transactional(readOnly = true)
     public List<AnswerOption> getAnswersForQuestion(Long questionId) {
@@ -31,38 +24,18 @@ public class AnswerOptionService {
         return answerOptionRepository.findByQuestionOrderByOptionNumber(question);
     }
 
-    /* ─────────────── создание ─────────────── */
-
-    /**
-     * Добавить вариант ответа.
-     * @param question  вопрос-владелец
-     * @param text      текст нового варианта
-     * @param correct   делать ли его правильным
-     */
     @Transactional
     public AnswerOption addAnswer(Question question,
                                   String   text,
                                   boolean  correct) {
-
         int nextNumber = getAnswersForQuestion(question).size() + 1;
-
         AnswerOption option = new AnswerOption(text, nextNumber, correct);
         option.setQuestion(question);
-
-        // если добавляемый вариант отмечен как правильный - снимаем отметку с других
         if (correct) {
             setCorrectAnswer(question, nextNumber);
         }
-
         return answerOptionRepository.save(option);
     }
-
-    /* ─────────────── удаление ─────────────── */
-
-    /**
-     * Удалить вариант ответа по его номеру (1-based).
-     * После удаления происходит автоматическая перенумерация.
-     */
     @Transactional
     public void deleteAnswer(Question question, int optionNumber) {
 
@@ -80,20 +53,11 @@ public class AnswerOptionService {
             }
             idx++;
         }
-
-        // если удалили правильный ответ – сбрасываем признак
         if (question.getCorrectAnswer() != null
                 && question.getCorrectAnswer() == optionNumber) {
             question.setCorrectAnswer(null);
         }
     }
-
-    /* ─────────────── изменение правильного ответа ─────────────── */
-
-    /**
-     * Сделать указан­ный номер правильным.
-     * @param optionNumber  номер (1-based)
-     */
     @Transactional
     public void setCorrectAnswer(Question question, int optionNumber) {
 

@@ -16,15 +16,12 @@ public class Question {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    /** Текст вопроса */
     @Column(columnDefinition = "TEXT")
     private String text;
 
-    /** Номер правильного ответа (если нужно иметь дублирующий готовый доступ) */
     @Column(name = "correct_answer")
     private Integer correctAnswer;
 
-    /** Список вариантов — сохраняются каскадом вместе с вопросом */
     @OneToMany(
             mappedBy = "question",
             cascade = CascadeType.ALL,

@@ -13,9 +13,7 @@ import java.util.List;
 @Repository
 public interface QuestionRepository extends JpaRepository<Question, Long> {
 
-    /**
-     * Возвращает все варианты вопросов (с опциями) по test_id, без сортировки.
-     */
+    long countByTest(Test test);
     @EntityGraph(attributePaths = {"answerOptions"})
     List<Question> findByTestId(Long testId);
 

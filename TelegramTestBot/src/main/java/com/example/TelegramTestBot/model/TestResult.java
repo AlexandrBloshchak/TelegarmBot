@@ -12,13 +12,9 @@ public class TestResult {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // Связь с пользователем
     @ManyToOne
     @JoinColumn(name = "user_id", referencedColumnName = "id")
     private User user;
-
-    // Убираем поле userId
-    // private Long userId;
 
     @ManyToOne
     @JoinColumn(name = "test_id", referencedColumnName = "id")
@@ -36,7 +32,6 @@ public class TestResult {
     @Column(name = "completion_date")
     private LocalDateTime completionDate;
 
-    // Геттеры и сеттеры
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
 

@@ -15,7 +15,6 @@ public class User {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // Маппинг на столбец login в БД
     @Column(name = "login", nullable = false, unique = true)
     @NotBlank
     private String username;
@@ -24,7 +23,6 @@ public class User {
     @NotBlank
     private String password;
 
-    // Маппинг на full_name в БД
     @Column(name = "full_name", nullable = false)
     @NotBlank
     private String fullName;

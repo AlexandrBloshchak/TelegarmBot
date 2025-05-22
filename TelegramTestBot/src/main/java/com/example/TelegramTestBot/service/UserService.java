@@ -16,7 +16,6 @@ public class UserService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
 
-    /** Дополнительный кэш: chatId → userId (можно убрать, если не нужен) */
     private final Map<Long, Long> loggedInUsers = new ConcurrentHashMap<>();
 
     public UserService(UserRepository userRepository,
@@ -25,66 +24,53 @@ public class UserService {
         this.passwordEncoder = passwordEncoder;
     }
 
-    public Optional<User> findByChatId(Long chatId) {
-        return userRepository.findByChatId(chatId);
+    public Optional<User> findByFullName(String fullName) {
+        return userRepository.findByFullNameIgnoreCase(fullName);
     }
-
-    /** Сброс авторизации без явного “выхода” пользователя (по таймауту и т.д.) */
+    public boolean existsByUsername(String username) {
+        return userRepository.findByUsername(username)
+                .isPresent();
+    }
     @Transactional
-    public void unlogin(Long chatId) {
-        userRepository.findByChatId(chatId).ifPresent(user -> {
-            user.setAuthenticated(false);
-            user.setChatId(null);
-            userRepository.save(user);
-            loggedInUsers.remove(chatId);
-        });
+    public void updatePassword(User user, String newPassword) {
+        user.setPassword(passwordEncoder.encode(newPassword));
+        userRepository.save(user);
+    }
+    @Transactional
+    public User save(User user) {
+        return userRepository.save(user);
     }
 
     @Transactional(readOnly = true)
     public Optional<User> findByUsername(String username) {
-        return userRepository.findByUsername(username);   // нужен соответствующий метод в UserRepository
+        return userRepository.findByUsername(username);
     }
     @Transactional
     public boolean authenticate(String login, String password, Long chatId) {
         return userRepository.findByUsername(login)
                 .filter(u -> passwordEncoder.matches(password, u.getPassword()))
                 .map(u -> {
-                    u.setAuthenticated(true);   // пользователь «в системе»
-                    u.setChatId(chatId);        // сохраняем chatId
-                    userRepository.save(u);     // фиксация изменений
+                    u.setAuthenticated(true);
+                    u.setChatId(chatId);
+                    userRepository.save(u);
                     loggedInUsers.put(chatId, u.getId());
                     return true;
                 })
                 .orElse(false);
     }
-
-    /** Корректный выход из аккаунта */
-    @Transactional
-    public void logout(Long chatId) {
-        userRepository.findByChatId(chatId).ifPresent(user -> {
-            user.setAuthenticated(false);
-            user.setChatId(null);
-            userRepository.save(user);
-            loggedInUsers.remove(chatId);
-        });
-    }
-
-    /**
-     * Получить авторизованного пользователя по chatId.
-     * Вернёт пустой Optional, если пользователь не найден или не авторизован.
-     */
     public Optional<User> getAuthenticatedUser(Long chatId) {
         return userRepository.findByChatId(chatId)
                 .filter(User::isAuthenticated);
     }
-
-    public boolean userExists(String username) {
-        return userRepository.findByUsername(username).isPresent();
+    @Transactional
+    public void logout(Long chatId) {
+        userRepository.findByChatId(chatId).ifPresent(u -> {
+            u.setAuthenticated(false);
+            u.setChatId(null);
+            userRepository.save(u);
+        });
+        loggedInUsers.remove(chatId);
     }
-
-    /**
-     * Регистрация нового пользователя + мгновенный логин.
-     */
     @Transactional
     public User register(String username,
                          String password,

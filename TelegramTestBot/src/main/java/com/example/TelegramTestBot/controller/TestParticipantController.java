@@ -34,67 +34,23 @@ public class TestParticipantController {
     private final TestService testService;
     private final QuestionService questionService;
     private final AnswerOptionService answerOptionService;
-    private final TestResultRepository testResultRepository;
-    private final TestRepository testRepository;
+    private static final String TEST_PREFIX = "📝 ";
     private final Map<Long, TestSession> sessions = new ConcurrentHashMap<>();
-    public String getUserPassedTestsInfo(User user) {
-        // Получаем все результаты тестов пользователя по user_id
-        List<TestResult> userResults = testResultRepository.findByUserId(user.getId());
-
-        if (userResults.isEmpty()) {
-            return "Вы еще не прошли ни одного теста";
-        }
-
-        StringBuilder sb = new StringBuilder();
-        for (TestResult result : userResults) {
-            // Если тест не загружен через JPA, загружаем его отдельно
-            Test test = result.getTest();
-            if (test == null) {
-                test = testRepository.findById(result.getTestId()).orElse(null);
-                if (test == null) continue;
-            }
-
-            sb.append("• ")
-                    .append(test.getTitle())
-                    .append("\nРезультат: ")
-                    .append(result.getScore())
-                    .append("/")
-                    .append(result.getMaxScore())
-                    .append(" (")
-                    .append(String.format("%.1f", (result.getScore() * 100.0 / result.getMaxScore())))
-                    .append("%)")
-                    .append("\nДата: ")
-                    .append(result.getCompletionDate().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")))
-                    .append("\n\n");
-        }
-
-        return sb.toString();
-    }
-    public int getCompletedTestsCount(User user) {
-        return testResultRepository.countByUserId(user.getId());
-    }
+    private final Set<Long> awaitingTestChoice = ConcurrentHashMap.newKeySet();
     public BotApiMethod<?> handleUpdate(Update update, User user) {
         if (!update.hasMessage() || update.getMessage().getText() == null) {
             return null;
         }
-
         Long chatId = update.getMessage().getChatId();
         String text = update.getMessage().getText().trim();
-
-        // Обработка ответа на текущий вопрос теста
         if (sessions.containsKey(chatId)) {
             return handleAnswer(chatId, text, user);
         }
-
-        // Обработка команды начала теста
         if (text.equalsIgnoreCase("/starttest") || text.equalsIgnoreCase("пройти тест")) {
             return handleTestStartCommand(chatId, user);
         }
-
-        // Обработка выбора конкретного теста
         return handleTestSelection(chatId, user, text);
     }
-
     public BotApiMethod<?> handleTestStartCommand(Long chatId, User user) {
         List<Test> tests = testService.getAvailableTests(user);
         if (tests.isEmpty()) {
@@ -102,15 +58,26 @@ public class TestParticipantController {
         }
         return createTestSelectionKeyboard(chatId, tests);
     }
-
     private BotApiMethod<?> handleTestSelection(Long chatId, User user, String text) {
+
+        // работаем ТОЛЬКО если ждём выбор из списка
+        if (!awaitingTestChoice.remove(chatId)) {
+            return null;
+        }
+
+        // должен начинаться с префикса
+        if (!text.startsWith(TEST_PREFIX)) {
+            return null;
+        }
+
+        String title = text.substring(TEST_PREFIX.length()).trim();
+
         return testService.getAvailableTests(user).stream()
-                .filter(t -> t.getTitle().equalsIgnoreCase(text))
+                .filter(t -> t.getTitle().equalsIgnoreCase(title))
                 .findFirst()
-                .map(test -> startTestSession(chatId, test))
+                .map(t -> startTestSession(chatId, t))
                 .orElse(null);
     }
-
     private BotApiMethod<?> startTestSession(Long chatId, Test test) {
         try {
             // Получаем список всех вопросов для выбранного теста
@@ -135,30 +102,25 @@ public class TestParticipantController {
                     "Произошла ошибка при загрузке теста. Попробуйте позже.");
         }
     }
-
     private BotApiMethod<?> createTestSelectionKeyboard(Long chatId, List<Test> tests) {
-        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
-        keyboard.setResizeKeyboard(true);
-        keyboard.setOneTimeKeyboard(true);
-        keyboard.setSelective(true);
+        ReplyKeyboardMarkup kb = new ReplyKeyboardMarkup();
+        kb.setResizeKeyboard(true);
+        kb.setOneTimeKeyboard(true);
 
-        List<KeyboardRow> rows = tests.stream()
-                .map(test -> {
-                    KeyboardRow row = new KeyboardRow();
-                    row.add(test.getTitle());
-                    return row;
-                })
-                .collect(Collectors.toList());
+        List<KeyboardRow> rows = new ArrayList<>();
+        for (Test t : tests) {
+            rows.add(new KeyboardRow(List.of(new KeyboardButton(TEST_PREFIX + t.getTitle()))));
+        }
+        kb.setKeyboard(rows);
 
-        keyboard.setKeyboard(rows);
+        awaitingTestChoice.add(chatId);          // <-- ставим флаг ожидания
 
         return SendMessage.builder()
                 .chatId(chatId.toString())
                 .text("Выберите тест:")
-                .replyMarkup(keyboard)
+                .replyMarkup(kb)
                 .build();
     }
-
     private BotApiMethod<?> sendQuestion(Long chatId, TestSession session) {
         Question currentQuestion = session.getCurrentQuestion();
         List<AnswerOption> options = answerOptionService.getAnswersForQuestion(currentQuestion);
@@ -197,42 +159,32 @@ public class TestParticipantController {
                 .replyMarkup(keyboard)
                 .build();
     }
-
     private BotApiMethod<?> handleAnswer(Long chatId, String answerText, User user) {
         TestSession session = sessions.get(chatId);
         if (session == null) {
             return new SendMessage(chatId.toString(), "Сессия тестирования не найдена. Начните тест заново.");
         }
-
         try {
             int selectedOption = Integer.parseInt(answerText.trim()) - 1;
             List<AnswerOption> options = answerOptionService.getAnswersForQuestion(session.getCurrentQuestion());
-
             if (selectedOption < 0 || selectedOption >= options.size()) {
                 return new SendMessage(chatId.toString(),
                         "Неверный номер варианта. Пожалуйста, выберите номер из предложенных.");
             }
-
-            // Записываем ответ пользователя (1-based)
             session.getUserAnswers().add(selectedOption + 1);
-
-            // Проверяем правильность
             if (options.get(selectedOption).getIsCorrect()) {
                 session.incrementCorrect();
             }
-
-            // Если есть следующий вопрос — показываем его
             if (session.nextQuestion()) {
                 return sendQuestion(chatId, session);
             } else {
-                // Тест завершён — сохраняем результат в БД
                 testService.recordTestResult(
                         user,
                         session.getTest(),
-                        session.getCorrectCount(),
-                        session.getTotalQuestions()
+                        session.getAllQuestions(),
+                        session.getUserAnswers()
                 );
-                finishTestSession(chatId, session, user);
+                finishTestSession(chatId, session);
                 return null;
             }
         } catch (NumberFormatException e) {
@@ -241,87 +193,64 @@ public class TestParticipantController {
         }
     }
     public BotApiMethod<?> finishTestSession(Long chatId,
-                                             TestSession session,
-                                             User        user) {
-        // 1) Убираем сессию
+                                             TestSession session) {
         sessions.remove(chatId);
-
-        // 2) Считаем итоги
         Test   test    = session.getTest();
         int    total   = session.getTotalQuestions();
         int    correct = session.getCorrectCount();
         double perc    = total > 0 ? correct * 100.0 / total : 0.0;
-
         String header = String.format("*Результаты теста!* %d/%d (%.1f%%)",
                 correct, total, perc);
-
-        // 3) Собираем inline-клавиатуру с деталями
-        List<List<InlineKeyboardButton>> inlineKb = new ArrayList<>();
-
-        // 3.1) Заголовки
-        inlineKb.add(List.of(
-                InlineKeyboardButton.builder().text("№ Вопрос").callbackData("noop").build(),
-                InlineKeyboardButton.builder().text("Ваш ответ").callbackData("noop").build(),
-                InlineKeyboardButton.builder().text("Правильный").callbackData("noop").build(),
-                InlineKeyboardButton.builder().text("Баллы").callbackData("noop").build()
+        boolean show = test.getShowAnswers();
+        List<List<InlineKeyboardButton>> kb = new ArrayList<>();
+        kb.add(List.of(
+                ib("Вопрос"),
+                ib("Ваш"),
+                show ? ib("Прав.") : ib("✓/✗"),
+                show ? ib("Баллы") : ib(" ")
         ));
-
-        // 3.2) Строки вопросов
         for (int i = 0; i < total; i++) {
-            Question q      = session.getAllQuestions().get(i);
-            int      ua     = session.getUserAnswers().get(i);
-            int      ca     = q.getAnswerOptions().stream()
+
+            Question q  = session.getAllQuestions().get(i);
+            int ua      = session.getUserAnswers().get(i);       // выбранный участником
+            int ca      = q.getAnswerOptions().stream()          // правильный
                     .filter(AnswerOption::getIsCorrect)
                     .map(AnswerOption::getOptionNumber)
                     .findFirst().orElse(0);
-            int      pt     = ua == ca ? 1 : 0;
-            String   qText  = (i + 1) + ". " +
-                    q.getText().replaceAll("(.{40})", "$1\n");
+            int pt      = ua == ca ? 1 : 0;                      // балл
 
-            inlineKb.add(List.of(
-                    InlineKeyboardButton.builder()
-                            .text(qText).callbackData("noop").build(),
-                    InlineKeyboardButton.builder()
-                            .text(String.valueOf(ua)).callbackData("noop").build(),
-                    InlineKeyboardButton.builder()
-                            .text(String.valueOf(ca)).callbackData("noop").build(),
-                    InlineKeyboardButton.builder()
-                            .text(String.valueOf(pt)).callbackData("noop").build()
+            String qText = (i + 1) + ". " +
+                    q.getText()
+                            .replaceAll("\\R", " ")              // убираем перевод строк
+                            .replaceAll(" {2,}", " ")            // двойные пробелы
+                            .replaceAll("(.{40})", "$1\n");      // перенос каждые 40 символов
+
+            kb.add(List.of(
+                    ib(qText),
+                    ib(String.valueOf(ua)),
+                    show ? ib(String.valueOf(ca))
+                            : ib(ua == ca ? "✓" : "✗"),
+                    show ? ib(String.valueOf(pt))
+                            : ib(" ")
             ));
         }
-
-        // 3.3) Итоговая строка
-        inlineKb.add(List.of(
-                InlineKeyboardButton.builder()
-                        .text(String.format("Итого: %d/%d (%.1f%%)", correct, total, perc))
-                        .callbackData("noop")
-                        .build()
+        kb.add(List.of(
+                ib(String.format("Итого: %d/%d (%.1f%%)", correct, total, perc))
         ));
-
-        // 3.4) Сводка по пользователям
         List<UserResult> users = testService.getUserResults(test);
         if (!users.isEmpty()) {
-            inlineKb.add(List.of(
-                    InlineKeyboardButton.builder()
-                            .text("Сводка по пользователям:")
-                            .callbackData("noop").build()
-            ));
+            kb.add(List.of(ib("Сводка по пользователям:")));
             users.stream()
                     .sorted(Comparator.comparingDouble(UserResult::getPercentage).reversed())
-                    .forEach(ur -> inlineKb.add(List.of(
-                            InlineKeyboardButton.builder()
-                                    .text(String.format("%s: %.1f%%",
-                                            ur.getDisplayName(), ur.getPercentage()))
-                                    .callbackData("noop")
-                                    .build()
+                    .forEach(ur -> kb.add(List.of(
+                            ib(String.format("%s: %.1f%%",
+                                    ur.getDisplayName(), ur.getPercentage()))
                     )));
         }
 
         InlineKeyboardMarkup inlineMarkup = InlineKeyboardMarkup.builder()
-                .keyboard(inlineKb)
+                .keyboard(kb)
                 .build();
-
-        // 4) Первое сообщение — отчёт с inline-клавиатурой
         SendMessage report = SendMessage.builder()
                 .chatId(chatId.toString())
                 .text(header)
@@ -329,25 +258,22 @@ public class TestParticipantController {
                 .replyMarkup(inlineMarkup)
                 .build();
         testBot.executeMessage(report);
-
-        // 5) Второе сообщение — reply-клавиатура для управления
         ReplyKeyboardMarkup replyKb = new ReplyKeyboardMarkup();
         replyKb.setResizeKeyboard(true);
-
-        KeyboardRow row1 = new KeyboardRow();
-        row1.add("Выйти в меню");
-        KeyboardRow row2 = new KeyboardRow();
-        row2.add("Пройти заново");
-        replyKb.setKeyboard(List.of(row1, row2));
-
-        SendMessage controls = SendMessage.builder()
+        replyKb.setKeyboard(List.of(
+                new KeyboardRow(List.of(new KeyboardButton("Выйти в меню"))),
+                new KeyboardRow(List.of(new KeyboardButton("Пройти заново")))
+        ));
+        return SendMessage.builder()
                 .chatId(chatId.toString())
                 .text("Выберите действие:")
                 .replyMarkup(replyKb)
                 .build();
-
-        // Возвращаем второе сообщение, его уже отправит TestBot.onUpdateReceived
-        return controls;
     }
-
+    private InlineKeyboardButton ib(String text) {
+        return InlineKeyboardButton.builder()
+                .text(text)
+                .callbackData("noop")
+                .build();
+    }
 }

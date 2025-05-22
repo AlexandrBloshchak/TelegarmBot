@@ -2,6 +2,8 @@
 package com.example.TelegramTestBot.service;
 
 import com.example.TelegramTestBot.model.*;
+import com.example.TelegramTestBot.repository.DetailedResultRepository;
+import com.example.TelegramTestBot.repository.QuestionRepository;
 import com.example.TelegramTestBot.repository.TestRepository;
 import com.example.TelegramTestBot.repository.TestResultRepository;
 import org.springframework.stereotype.Service;
@@ -9,17 +11,18 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 @Service
 public class TestService {
-
+    private final DetailedResultRepository detailedResultRepository;
     private final TestRepository testRepository;
-    private final QuestionService questionService;
+    private final QuestionRepository questionRepository;
     private final TestResultRepository testResultRepository;
-    public TestService(TestRepository testRepository, QuestionService questionService, TestResultRepository testResultRepository) {
+    public TestService(DetailedResultRepository detailedResultRepository, TestRepository testRepository, QuestionRepository questionService, TestResultRepository testResultRepository) {
+        this.detailedResultRepository = detailedResultRepository;
         this.testRepository = testRepository;
-        this.questionService = questionService;
+        this.questionRepository = questionService;
         this.testResultRepository = testResultRepository;
     }
     public String getUserResults(Long userId) {
@@ -86,148 +89,110 @@ public class TestService {
     @Transactional
     public void recordTestResult(User user,
                                  Test test,
-                                 int correctCount,
-                                 int totalQuestions) {
-
-        int maxScore = totalQuestions;
-        int score    = correctCount;     // сколько баллов набрал
-
+                                 List<Question> questions,
+                                 List<Integer> userAnswers) {
+        int score = IntStream.range(0, questions.size())
+                .map(i -> {
+                    Integer ua = userAnswers.get(i);
+                    Integer ca = questions.get(i).getAnswerOptions().stream()
+                            .filter(AnswerOption::getIsCorrect)
+                            .map(AnswerOption::getOptionNumber)
+                            .findFirst()
+                            .orElse(null);        // правильный вариант
+                    return (ua != null && ua.equals(ca)) ? 1 : 0;
+                })
+                .sum();
         TestResult tr = new TestResult();
         tr.setUser(user);
         tr.setTest(test);
-
-        tr.setResult(score);             // ← 1) старое поле
-        tr.setScore(score);              // ← 2) новое поле
-
-        tr.setMaxScore(maxScore);
+        tr.setScore(score);
+        tr.setMaxScore(questions.size());
         tr.setCompletionDate(LocalDateTime.now());
-
         testResultRepository.save(tr);
-    }
+        for (int i = 0; i < questions.size(); i++) {
+            Question q = questions.get(i);
+            Integer ua = userAnswers.get(i);
+            Integer ca = q.getAnswerOptions().stream()
+                    .filter(AnswerOption::getIsCorrect)
+                    .map(AnswerOption::getOptionNumber)
+                    .findFirst()
+                    .orElse(null);
+            int pts = (ua != null && ua.equals(ca)) ? 1 : 0;
 
+            DetailedResult dr = new DetailedResult();
+            dr.setTestResult(tr);
+            dr.setQuestion(q);
+            dr.setQuestionIndex(i + 1);
+            dr.setUserAnswer(ua);
+            dr.setCorrectAnswer(ca);
+            dr.setPoints(pts);
+            detailedResultRepository.save(dr);
+        }
+    }
     @Transactional(readOnly = true)
     public List<Test> getTestsCreatedByUser(User creator) {
-        return testRepository.findByCreator(creator);          // нужен метод в репо
+        return testRepository.findByCreator(creator);
     }
     @Transactional(readOnly = true)
-    public long getQuestionCount(Test test) {
-        // чтобы не гонять лишний запрос, если коллекция уже загружена —
-        if (test.getQuestions() != null && !test.getQuestions().isEmpty()) {
-            return test.getQuestions().size();
-        }
-        return questionService.getQuestionsByTestId(test.getId()).size();
+    public long getQuestionCount(Test t) {
+        return questionRepository.countByTest(t);
     }
     @Transactional
     public void renameTest(Test test, String newTitle) {
         test.setTitle(newTitle);
         testRepository.save(test);
     }
-    /** найти тест по названию и автору */
+    @Transactional(readOnly = true)
+    public List<DetailedResult> getDetailedResults(TestResult tr) {
+        return detailedResultRepository.findByTestResultOrderByQuestionIndex(tr);
+    }
     @Transactional(readOnly = true)
     public Optional<Test> findByTitleAndUser(String title, User creator) {
         return testRepository.findByTitleIgnoreCaseAndCreator(title, creator);
     }
-
-    /** «Удалить тест» (каскад/FK заведены в JPA-модели) */
+    @Transactional
+    public void save(Test test) {
+        testRepository.save(test);
+    }
     @Transactional
     public void deleteTest(Test test) {
         testRepository.delete(test);
     }
-
-    /** краткая сводка: кто проходил тест (score – лучшее значение пользователя) */
-    @Transactional(readOnly = true)
-    public List<UserResult> getTestParticipants(Test test) {
-        // получаем все результаты
-        List<TestResult> results = testResultRepository.findByTest(test);
-        Map<Long, UserResult> map = new HashMap<>();
-        for (TestResult r : results) {
-            long uid   = r.getUser().getId();
-            int  score = r.getScore() != null ? r.getScore() : 0;
-            int  best  = map.containsKey(uid) ? map.get(uid).getScore() : -1;
-            if (score > best) {
-                map.put(uid, new UserResult(r.getUser().getUsername(), score, uid));
-            }
-        }
-        return new ArrayList<>(map.values());
-    }
-
-    /** все результаты конкретного пользователя по данному тесту */
     @Transactional(readOnly = true)
     public List<TestResult> getResultsByTestAndUser(Test test, User user) {
         return testResultRepository.findByTestAndUser(test, user);
     }
-    public List<TestResult> getCompletedTestsForUser(User user) {
-        // Получаем результаты тестов, которые прошел пользователь
-        return testResultRepository.findByUser(user);
-    }
     @Transactional(readOnly = true)
-    public List<TestResult> getResultsByTest(Test test) {
-        return testResultRepository.findByTest(test);
-    }
-    @Transactional(readOnly = true)
-    public List<Test> getTestsByTitle(String title) {
-        return testRepository.findByTitleIgnoreCase(title);
-    }
+    public List<UserResult> getTestParticipants(Test test) {
+        List<TestResult> results = testResultRepository.findByTest(test);
+        Map<Long, UserResult> map = new HashMap<>();
 
-    @Transactional
-    public Test createNewTest(User creator, String testTitle) {
-        Test test = new Test();
-        test.setCreator(creator);
-        test.setTitle(testTitle);
-        test.setStatus(Test.TestStatus.DRAFT);
-        return testRepository.save(test);
-    }
+        for (TestResult r : results) {
+            User u = r.getUser();
+            if (u == null) continue;
 
-    @Transactional(readOnly = true)
-    public List<Question> getTestQuestionsByTitle(String title) {
-        return testRepository.findByTitleIgnoreCase(title)
-                .stream()
-                .findFirst()
-                .map(t -> questionService.getQuestionsByTestId(t.getId()))
-                .orElse(List.of());
+            long uid = u.getId();
+            int  score = r.getScore() != null ? r.getScore() : 0;
+            int  max   = r.getMaxScore() != null ? r.getMaxScore() : 0;
+            String name = Optional.ofNullable(u.getFullName())
+                    .filter(s -> !s.isBlank())
+                    .orElse(u.getUsername());
+            if (Objects.equals(uid, test.getCreator().getId())) {
+                name += " (автор)";
+            }
+            UserResult ur = new UserResult(name, u.getUsername(), score * 100.0 / (max == 0 ? 1 : max));
+            ur.setScore(score);
+            ur.setMaxScore(max);
+            ur.setUserId(uid);
+            UserResult prev = map.get(uid);
+            if (prev == null || ur.getScore() > prev.getScore()) {
+                map.put(uid, ur);
+            }
+        }
+        return new ArrayList<>(map.values());
     }
-
     @Transactional(readOnly = true)
     public List<Test> getAvailableTests(User user) {
         return testRepository.findAll();
-    }
-
-    @Transactional
-    public void addQuestionsToTest(Long testId, List<Question> questions) {
-        Optional<Test> testOpt = testRepository.findById(testId);
-        if (testOpt.isPresent()) {
-            Test test = testOpt.get();
-            questions.forEach(q -> {
-                q.setTest(test);
-                questionService.save(q);
-            });
-            test.setStatus(Test.TestStatus.PUBLISHED);
-            testRepository.save(test);
-        }
-    }
-
-    @Transactional(readOnly = true)
-    public List<Question> getTestQuestions(Test test) {
-        return questionService.getQuestionsWithAnswersByTest(test);
-    }
-
-    @Transactional
-    public Test saveTest(Test test) {
-        return testRepository.save(test);
-    }
-
-    @Transactional
-    public void addQuestionToTest(Long testId, Question question) {
-        testRepository.findById(testId).ifPresent(test -> {
-            question.setTest(test);
-            questionService.save(question);
-            test.setStatus(Test.TestStatus.PUBLISHED);
-            testRepository.save(test);
-        });
-    }
-
-    @Transactional(readOnly = true)
-    public Optional<Test> findById(Long testId) {
-        return testRepository.findById(testId);
     }
 }

@@ -2,16 +2,12 @@ package com.example.TelegramTestBot.model;
 
 import lombok.Data;
 
-/**
- * DTO для отображения результатов пользователей по тесту
- */
 @Data
 public class UserResult {
     private String displayName;
     private String testName;
     private Integer score;
     private Integer maxScore;
-    /** Логин или имя пользователя */
     private String username;
     private Long userId;
     private double percentage;

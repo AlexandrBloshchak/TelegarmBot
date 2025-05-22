@@ -12,8 +12,5 @@ import java.util.List;
 public interface TestResultRepository extends JpaRepository<TestResult, Long> {
     List<TestResult> findByTestAndUser(Test test, User user);
     List<TestResult> findByUserId(Long userId);
-    List<TestResult> findByUser(User user);
     List<TestResult> findByTest(Test test);
-    int countByUserId(Long userId);
-    List<TestResult> findByTestId(Long testId);
 }
